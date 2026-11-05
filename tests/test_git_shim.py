@@ -72,6 +72,43 @@ def test_message_flag_after_ddash_is_a_pathspec_not_a_flag():
     assert git_shim._is_plain_commit(["commit", "--", "-m"]) is True
 
 
+def test_real_git_uses_shim_env_when_argv0_is_dash_c(monkeypatch, tmp_path):
+    # Installed launcher is `python -c`, so argv[0] is "-c". The directory to skip
+    # comes from LLM_GIT_COMMIT_SHIM, which compile.sh writes into the stub.
+    shim_dir = tmp_path / "shim"
+    real_dir = tmp_path / "real"
+    shim_dir.mkdir()
+    real_dir.mkdir()
+    (shim_dir / "git").write_text("#!/bin/sh\n")
+    (real_dir / "git").write_text("#!/bin/sh\n")
+    for p in (shim_dir / "git", real_dir / "git"):
+        p.chmod(0o755)
+
+    monkeypatch.setattr(git_shim.sys, "argv", ["-c", "commit"])
+    monkeypatch.setenv("LLM_GIT_COMMIT_SHIM", str(shim_dir / "git"))
+    monkeypatch.setenv("PATH", f"{shim_dir}{os.pathsep}{real_dir}")
+    assert git_shim._real_git() == str(real_dir / "git")
+
+
+def test_exec_git_hides_shim_dir_from_the_child(monkeypatch, tmp_path):
+    shim_dir = tmp_path / "shim"
+    real_dir = tmp_path / "real"
+    shim_dir.mkdir()
+    real_dir.mkdir()
+    seen = tmp_path / "path.txt"
+    (shim_dir / "git").write_text("#!/bin/sh\n")
+    (shim_dir / "git").chmod(0o755)
+    (real_dir / "git").write_text(f"#!/bin/sh\nprintf '%s' \"$PATH\" > '{seen}'\n")
+    (real_dir / "git").chmod(0o755)
+
+    monkeypatch.setenv("LLM_GIT_COMMIT_SHIM", str(shim_dir / "git"))
+    monkeypatch.setenv("PATH", f"{shim_dir}{os.pathsep}{real_dir}")
+    assert git_shim._exec_git(str(real_dir / "git"), ["status"]) == 0
+    assert str(shim_dir) not in seen.read_text().split(os.pathsep)
+    # The parent PATH is unchanged -- a leaked mutation would hide git from later tests.
+    assert str(shim_dir) in os.environ["PATH"].split(os.pathsep)
+
+
 def test_real_git_excludes_the_shim_dir(monkeypatch, tmp_path):
     # A fake `git` placed in a dir that is on PATH AND is the shim's own dir must be
     # skipped, so the shim never resolves to itself.
@@ -108,7 +145,7 @@ def test_hijack_generates_subject_and_delegates_to_real_git(monkeypatch):
     assert calls == [("/usr/bin/git", ["commit", "-m", "Add feature", "-s"])]
 
 
-def test_hijack_falls_through_when_model_gives_nothing(monkeypatch):
+def test_hijack_does_not_open_the_editor_when_model_gives_nothing(monkeypatch, capsys):
     calls = []
     monkeypatch.setattr(git_shim, "_real_git", lambda: "/usr/bin/git")
     monkeypatch.setattr(git_shim, "_exec_git",
@@ -121,8 +158,9 @@ def test_hijack_falls_through_when_model_gives_nothing(monkeypatch):
     monkeypatch.setattr(git_io, "commit_preview_diff", lambda *, include_tracked: "a diff")
     monkeypatch.setattr(llm, "generate_subject", lambda *a, **k: "Done.")  # cleans to ''
 
-    assert git_shim.main(["commit"]) == 0
-    assert calls == [["commit"]]        # delegated verbatim -> git's own editor flow
+    assert git_shim.main(["commit"]) == 1
+    assert calls == []                  # no git commit, so no editor
+    assert "could not write a commit subject" in capsys.readouterr().err
 
 
 def test_hijack_noop_when_nothing_to_commit(monkeypatch):

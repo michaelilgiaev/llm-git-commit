@@ -1,6 +1,6 @@
 # Bash completion for the `llm-git-commit` CLI.
 #
-# Installed by install.sh where the bash-completion lazy loader finds it:
+# Installed where the bash-completion lazy loader finds it (see README):
 #   /usr/share/bash-completion/completions/llm-git-commit
 # The git shim itself rides git's OWN completion, so this only covers the CLI.
 # Position 1 completes the subcommand list (commit, help); nothing else completes.

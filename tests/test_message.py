@@ -1,10 +1,8 @@
 """Tests for message.extract_subject -- the commit-subject cleaner.
 
-This is the logic the old aicommit hid in a bash sed/grep/case pipeline inside a
-triple-escaped heredoc. These tests pin the exact behaviour the overhaul preserves:
-last-non-empty-line extraction, fence/wrapper/period stripping, and the chatter
-reject list. A regression here is exactly what used to land agent chatter as a
-commit subject.
+These tests pin the behaviour: last-non-empty-line extraction, fence/wrapper/period
+stripping, and the chatter reject list. A regression here is exactly what would land
+model chatter as a commit subject.
 """
 
 from __future__ import annotations
@@ -19,7 +17,7 @@ def test_plain_subject_passes_through():
 
 
 def test_takes_last_nonempty_line_not_first():
-    # On a big diff haiku emits a preamble; the real subject is the LAST line.
+    # On a big diff the model emits a preamble; the real subject is the LAST line.
     reply = "Looking at the diff, the change adds a helper.\n\nAdd greeting helper"
     assert message.extract_subject(reply) == "Add greeting helper"
 
@@ -56,10 +54,11 @@ def test_language_tagged_fence_is_dropped():
     "reply",
     [
         "Here is the commit subject:",      # trailing colon lead-in
+        "Write the commit subject line",    # echoed instruction
+        "Write a commit subject for this",  # echoed instruction
         "I will write the subject",          # first-person opener
         "Let me summarize the changes",      # lead-in
         "Based on the diff",                 # lead-in
-        "This change does a bunch",          # "This " lead-in
         "Done. The commit subject is ready above.",  # acknowledgement chatter
         "Perfect, here you go",              # acknowledgement
         "- add a helper",                    # a single list item, not the change
@@ -80,7 +79,7 @@ def test_rejects_prose_far_past_cap():
 
 
 def test_real_subject_slightly_over_72_is_kept():
-    # aicommit rejected only past 100, not 72 -- a real subject a little long is fine.
+    # We reject only past 100, not 72 -- a real subject a little long is fine.
     subject = "Add a reasonably descriptive commit subject line that runs a little past seventy-two"
     assert 72 < len(subject) <= 100
     assert message.extract_subject(subject) == subject
@@ -88,3 +87,9 @@ def test_real_subject_slightly_over_72_is_kept():
 
 def test_legit_subject_starting_with_add_is_untouched():
     assert message.extract_subject("Add -v flag to parser") == "Add -v flag to parser"
+
+
+def test_short_this_line_is_a_subject():
+    # "This adds ..." is a subject. Rejecting it used to throw the line away
+    # and drop the user into the editor.
+    assert message.extract_subject("This adds a compile script") == "This adds a compile script"

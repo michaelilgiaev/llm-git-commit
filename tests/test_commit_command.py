@@ -38,11 +38,16 @@ def test_nothing_staged_is_noop(git_repo, monkeypatch, capsys):
     assert "Nothing staged" in capsys.readouterr().out
 
 
-def test_retries_once_then_succeeds(staged_repo, monkeypatch):
-    # First reply is pure chatter (cleans to ''), second is a real subject.
-    replies = iter(["Here is the subject:", "Fix the thing"])
-    monkeypatch.setattr(llm, "generate_subject", lambda *a, **k: next(replies))
+def test_one_generation_then_commit(staged_repo, monkeypatch):
+    calls = {"n": 0}
+
+    def _once(*a, **k):
+        calls["n"] += 1
+        return "Fix the thing"
+
+    monkeypatch.setattr(llm, "generate_subject", _once)
     assert commit_command.run() == 0
+    assert calls["n"] == 1
     log = _git(staged_repo, "log", "--oneline", "-1").stdout
     assert "Fix the thing" in log
 
@@ -50,6 +55,6 @@ def test_retries_once_then_succeeds(staged_repo, monkeypatch):
 def test_all_chatter_fails_without_committing(staged_repo, monkeypatch, capsys):
     monkeypatch.setattr(llm, "generate_subject", lambda *a, **k: "Done. Ready above.")
     assert commit_command.run() == 1
-    assert "could not generate" in capsys.readouterr().err
+    assert "could not write a commit subject" in capsys.readouterr().err
     import git_io
     assert git_io.head_has_commits() is False

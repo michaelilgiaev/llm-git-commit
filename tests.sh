@@ -2,17 +2,16 @@
 #
 # llm-git-commit -- test entry point. `bash tests.sh` is the ONE command.
 #
-# Self-bootstrapping: creates cache/venv if missing, installs tests/requirements.txt into
-# it, runs pytest. Nothing global is touched; the venv is gitignored under cache/ (the same
-# scratch root compile.sh and clear.sh use). pip is skipped when requirements.txt is
-# unchanged.
+# Self-bootstrapping: creates venv/ if missing, installs tests/requirements.txt into it,
+# runs pytest. Nothing global is touched; venv/ is gitignored at the project root (the same
+# venv compile.sh and clear.sh use). pip is skipped when requirements.txt is unchanged.
 #
 # The tests are PURE and OFFLINE. They never load a GGUF and never reach the network (the
 # local model is faked). Git IS exercised, but only against throwaway repos created under
 # pytest's tmp_path -- nothing in your real repos is ever touched or committed.
 #
 # Any arguments are passed straight through to pytest, e.g.:
-#   bash tests.sh -k version        run only tests matching "version"
+#   bash tests.sh -k shim           run only tests matching "shim"
 #   bash tests.sh -q                quiet
 #   bash tests.sh tests/test_message.py
 #
@@ -23,7 +22,7 @@ set -o pipefail
 REPODIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPODIR"
 
-VENV="$REPODIR/cache/venv"
+VENV="$REPODIR/venv"
 PY="$VENV/bin/python"
 REQ="$REPODIR/tests/requirements.txt"
 STAMP="$VENV/.requirements.installed"

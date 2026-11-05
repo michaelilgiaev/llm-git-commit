@@ -4,36 +4,36 @@ cd "$(dirname "$0")"
 
 usage() {
   cat <<'EOF'
-Usage: clear.sh [-o] [-l] [-c] [-h]
+Usage: clear.sh [--venv] [--output] [--cache] [--logs] [-h]
 
-Clears the build tree. With NO flags it clears everything (the default):
-output/, logs/, cache/, every __pycache__ in the project, and .pytest_cache/.
+Clears the build tree. With NO flags it clears everything (the default): venv/,
+output/, cache/, logs/, every __pycache__ in the project, and .pytest_cache/.
 
-Pass flags to clear only PART of the tree (flags combine):
-  -o, --output   clear only output/
-  -l, --logs     clear only logs/
-  -c, --cache    clear only cache/  (also sweeps __pycache__ and .pytest_cache/)
-  -h, --help     show this help and exit
-
-cache/ is the single scratch root: the runtime/test venv lives there, so clearing
-it forces a fresh venv (and a re-download of requirements on next install).
+Pass flags to clear only PART of the tree (flags combine), each its own directory:
+  --venv     clear only venv/    (the runtime/test venv -> forces a fresh venv)
+  --output   clear only output/  (the delivered launchers)
+  --cache    clear only cache/   (also sweeps __pycache__ and .pytest_cache/)
+  --logs     clear only logs/
+  -h, --help show this help and exit
 
 Examples:
-  clear.sh            clear output/, logs/, cache/, __pycache__, .pytest_cache (all)
-  clear.sh -o -l      clear output/ and logs/ only (leaves cache/, __pycache__, .pytest_cache)
-  clear.sh -c         clear cache/, __pycache__ and .pytest_cache only
+  clear.sh                  clear venv/, output/, cache/, logs/, __pycache__, .pytest_cache (all)
+  clear.sh --output --logs  clear output/ and logs/ only
+  clear.sh --venv           clear only venv/ (next compile.sh/tests.sh rebuilds it)
 EOF
 }
 
+do_venv=0
 do_output=0
-do_logs=0
 do_cache=0
+do_logs=0
 any_flag=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -o|--output) do_output=1; any_flag=1 ;;
-    -l|--logs)   do_logs=1;   any_flag=1 ;;
-    -c|--cache)  do_cache=1;  any_flag=1 ;;
+    --venv)      do_venv=1;   any_flag=1 ;;
+    --output)    do_output=1; any_flag=1 ;;
+    --cache)     do_cache=1;  any_flag=1 ;;
+    --logs)      do_logs=1;   any_flag=1 ;;
     -h|--help)   usage; exit 0 ;;
     *)
       echo "clear.sh: unknown option '$1'" >&2
@@ -45,13 +45,16 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 if [ "$any_flag" -eq 0 ]; then       # no flags -> the everything-clear
+  do_venv=1
   do_output=1
-  do_logs=1
   do_cache=1
+  do_logs=1
 fi
+# __pycache__ / .pytest_cache ride with cache (or the no-flag default that selects cache).
 sweep_pyc="$do_cache"
 
 targets=()
+[ "$do_venv" -eq 1 ]   && targets+=(venv)
 [ "$do_logs" -eq 1 ]   && targets+=(logs)
 [ "$do_cache" -eq 1 ]  && targets+=(cache)
 [ "$do_output" -eq 1 ] && targets+=(output)

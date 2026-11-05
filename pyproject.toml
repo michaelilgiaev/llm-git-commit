@@ -1,6 +1,6 @@
 # pytest configuration for the llm-git-commit test suite.
 #
-# Driven by `bash tests.sh` (which builds cache/venv and sets PYTHONPATH); this config also
+# Driven by `bash tests.sh` (which builds venv/ and sets PYTHONPATH); this config also
 # makes a bare `pytest` work from inside an activated venv. pythonpath below adds the single
 # import root (libraries/) so the flat modules (checks, git_io, message, ...) resolve without
 # any wrapper. Discovery is scoped to tests/. The suite is pure/offline -- it fakes the local

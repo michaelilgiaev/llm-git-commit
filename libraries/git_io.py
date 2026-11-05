@@ -11,9 +11,23 @@ import subprocess
 
 from checks import die
 
-# How much of the diff we feed the model. A small model needs no more than this to
-# write one subject line, and a huge body only invites a rambling preamble.
-_DIFF_BYTES = 6000
+# A short patch still fits in the prompt and names the actual change. Anything
+# longer is dropped: the 1.5B model then describes a file's text (the README)
+# instead of the commit, the cleaner rejects it, and the user lands in an editor.
+_PATCH_LIMIT = 800
+
+# Docs and images stay out of the patch even when it is short. Their prose is
+# exactly what the model copies back as the subject. The stat line still names them.
+_DOC_EXCLUDE = (
+    ":(exclude)*.md",
+    ":(exclude)*.png",
+    ":(exclude)*.jpg",
+    ":(exclude)*.jpeg",
+    ":(exclude)*.gif",
+    ":(exclude)*.webp",
+    ":(exclude)*.svg",
+    ":(exclude)*.ico",
+)
 
 
 def _git(*args: str, check: bool = False) -> subprocess.CompletedProcess:
@@ -39,28 +53,39 @@ def anything_to_commit(*, include_tracked: bool) -> bool:
     return include_tracked and _git("diff", "--quiet").returncode != 0
 
 
+def _patch(*, cached: bool, tracked: bool) -> str:
+    """Code patch only. Markdown and images are excluded (see _DOC_EXCLUDE)."""
+    spec = [".", *_DOC_EXCLUDE]
+    chunks = []
+    if cached:
+        chunks.append(_git("--no-pager", "diff", "--cached", "--", *spec).stdout)
+    if tracked:
+        chunks.append(_git("--no-pager", "diff", "--", *spec).stdout)
+    return "".join(chunks)
+
+
 def staged_diff() -> str:
-    """The staged diff: a `--stat` summary, a separator, then the first _DIFF_BYTES
-    of the full cached diff."""
+    """What the model reads for a staged commit: the stat, plus a short code patch."""
     return _shape(_git("--no-pager", "diff", "--cached", "--stat").stdout,
-                  _git("--no-pager", "diff", "--cached").stdout)
+                  _patch(cached=True, tracked=False))
 
 
 def commit_preview_diff(*, include_tracked: bool) -> str:
-    """The diff the model should summarise for a `git commit`. Always the staged
-    (--cached) changes; with include_tracked=True (the `-a`/`--all` case, where git
-    also commits tracked-but-unstaged edits) the working-tree diff of tracked files
-    is appended so the subject reflects everything that will land."""
+    """What the model reads for `git commit`. Staged changes always; with
+    include_tracked (the `-a` case) the unstaged edits of tracked files too."""
     stat = _git("--no-pager", "diff", "--cached", "--stat").stdout
-    body = _git("--no-pager", "diff", "--cached").stdout
     if include_tracked:
         stat += _git("--no-pager", "diff", "--stat").stdout
-        body += _git("--no-pager", "diff").stdout
-    return _shape(stat, body)
+    return _shape(stat, _patch(cached=True, tracked=include_tracked))
 
 
 def _shape(stat: str, body: str) -> str:
-    return f"{stat}\n---\n{body[:_DIFF_BYTES]}"
+    """Stat always. The patch only when it is short enough to help, not to distract."""
+    stat = stat.strip()
+    body = body.strip()
+    if body and len(body) <= _PATCH_LIMIT:
+        return f"{stat}\n---\n{body}"
+    return stat
 
 
 def commit(message: str) -> None:

@@ -1,8 +1,7 @@
-# Runtime requirements for llm-git-commit (installed into cache/venv by install.sh).
-# Inference is fully LOCAL and on the CPU -- no Anthropic API, no GPU.
+# Runtime requirement for llm-git-commit (installed into venv/ by compile.sh).
+# Inference is local and on the CPU.
 #
-# llama-cpp-python ships a prebuilt CPU wheel (py3-none, ctypes-loaded libllama.so)
-# from the project's own index, so no compiler/cmake is needed -- install.sh passes
-# that index as an --extra-index-url. huggingface_hub fetches the GGUF once.
+# llama-cpp-python ships a prebuilt CPU wheel (ctypes-loaded libllama.so) from
+# the project's own index, so nothing is compiled. compile.sh passes that index
+# as an --extra-index-url. The GGUF is fetched by llm.py, not by a hub library.
 llama-cpp-python==0.3.36
-huggingface_hub==2.4.0

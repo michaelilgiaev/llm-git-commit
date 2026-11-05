@@ -1,20 +1,13 @@
 """message.py - turn a model reply into ONE clean commit subject line.
 
-This is the logic the old aicommit implemented as a fragile pipeline of `sed`,
-`grep`, backtick strips and a bash `case` reject list inside a triple-escaped
-heredoc. Porting it to Python is the whole point of the overhaul: the exact
-behaviour is preserved, but it is now readable and unit-tested instead of hiding
-in the triple-escaped bash heredoc where a stray backslash silently broke it.
-
-WHY THIS EXISTS
-  haiku is pinned by a system prompt to emit ONE subject line, but on a LARGE
-  diff it can still prepend a short reasoning preamble with the real subject as
-  the LAST line, or fence its answer. So we:
+A small local model is pinned by a system prompt to emit ONE subject line, but on a
+LARGE diff it can still prepend a short reasoning preamble with the real subject as
+the LAST line, or fence its answer. This cleaner is readable and unit-tested. So we:
     * take the LAST non-empty line (not the first),
     * drop fence lines first,
     * strip wrapping backticks/quotes and a trailing period,
     * reject obvious non-subjects (chatter, list items, lead-ins, prose),
-  and the caller retries once if what survives is empty.
+and the caller treats an empty result as failure.
 """
 
 from __future__ import annotations
@@ -24,27 +17,29 @@ import re
 # A fence line: ``` optionally followed by a language tag, nothing else.
 _FENCE_RE = re.compile(r"^```[A-Za-z0-9]*$")
 
-# Reject shapes that are NOT a subject. Ported verbatim from aicommit's bash `case`:
+# Reject shapes that are NOT a subject:
 #   * a reasoning / first-person opener,
 #   * an acknowledgement (what a model emits when something made it keep talking),
 # all anchored at the START so a legitimate subject ("This fixes ...") is only
 # caught when it literally opens with one of these lead-ins.
 _LEADINS = (
     "Looking at ", "Here ", "I ", "Let me ", "Sure", "Okay", "Based on ",
-    "The staged ", "The changes ", "This ",
+    "The staged ",
+    # The instruction, if a model echoes it instead of writing a subject.
+    "Write the commit subject", "Write a commit subject",
 )
 _ACKS = (
     "Done", "Perfect", "Got it", "Great", "Understood", "Certainly", "Of course",
 )
 
-# The length cap. aicommit asked for <=72 but only REJECTED past 100 (a real
-# subject a little over 72 is fine; prose is far longer). Keep that threshold.
+# The length cap. We ask for <=72 but only REJECT past 100 (a real subject a little
+# over 72 is fine; prose is far longer).
 _MAX_LEN = 100
 
 
 def _strip_wrappers(line: str) -> str:
     """Strip a single pair of wrapping backticks or double-quotes, then a trailing
-    period -- the three cosmetic things haiku adds around an otherwise clean line."""
+    period -- the three cosmetic things a model adds around an otherwise clean line."""
     for q in ("`", '"'):
         if len(line) >= 2 and line.startswith(q) and line.endswith(q):
             line = line[1:-1]
@@ -83,14 +78,3 @@ def extract_subject(reply: str) -> str:
         return ""
     candidate = _strip_wrappers(candidate)
     return "" if _is_rejected(candidate) else candidate
-
-
-def extract_bump(reply: str) -> str:
-    """Map the bump model's raw `reply` onto 'major'/'minor'/'patch', or '' if none
-    is found. The model is told to answer with one bare word, but we scan the whole
-    reply case-insensitively for the FIRST of the three words so a stray wrapper or
-    preamble ("Bump: minor") still resolves."""
-    for word in re.findall(r"[a-z]+", reply.lower()):
-        if word in ("major", "minor", "patch"):
-            return word
-    return ""

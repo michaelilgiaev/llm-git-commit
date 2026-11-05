@@ -28,7 +28,25 @@ def test_staged_diff_contains_stat_and_body(staged_repo):
     diff = git_io.staged_diff()
     assert "app.py" in diff          # the --stat names the file
     assert "---" in diff             # the separator between stat and body
-    assert "def hi" in diff          # the body carries the actual change
+    assert "def hi" in diff          # a short patch carries the actual change
+
+
+def test_long_patch_is_dropped():
+    # The failure mode: a big patch (this repo's README) makes the model copy
+    # file text and the cleaner then rejects it.
+    text = git_io._shape("README.md | 64 +-\n", "Write " + ("x" * 2000))
+    assert "README.md" in text
+    assert "xxxx" not in text
+    assert "---" not in text
+
+
+def test_readme_prose_is_not_fed_to_the_model(git_repo):
+    prose = "Write git commit subjects with a small language model.\n"
+    (git_repo / "README.md").write_text(prose)
+    _git(git_repo, "add", "README.md")
+    diff = git_io.staged_diff()
+    assert "README.md" in diff
+    assert "small language model" not in diff
 
 
 def test_commit_preview_cached_only_ignores_unstaged(staged_repo):

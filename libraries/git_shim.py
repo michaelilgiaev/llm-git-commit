@@ -11,9 +11,8 @@ invocation is inspected:
     verbatim. The shim is transparent; when in doubt it delegates.
 
 Finding the real git: we drop the shim's OWN directory from PATH and resolve `git`
-again, so the shim never calls itself. Fail closed -- if no real git is found, or
-the model cannot produce a subject, we fall through to a normal `git commit` so the
-user still gets git's own editor flow rather than a broken command.
+again, so the shim never calls itself. If the model cannot write a subject we
+stop and say so. We do not open the editor.
 """
 
 from __future__ import annotations
@@ -40,13 +39,35 @@ _MESSAGE_LONG_EQ = ("--message=", "--file=", "--reuse-message=", "--reedit-messa
 _MESSAGE_SHORT = set("mFcCt")
 
 
+def _shim_dir() -> str | None:
+    """Directory of this shim, so we never resolve `git` back to ourselves.
+
+    The installed launcher is a shell stub that runs `python -c`, and that makes
+    sys.argv[0] literally `-c` -- useless as a path. compile.sh exports
+    LLM_GIT_COMMIT_SHIM with the stub's own path. A direct `python git_shim.py`
+    still has a real argv[0], which the unit tests use.
+    """
+    marked = os.environ.get("LLM_GIT_COMMIT_SHIM", "").strip()
+    if marked:
+        return os.path.dirname(os.path.abspath(marked))
+    argv0 = sys.argv[0]
+    if argv0 and argv0 != "-c" and os.path.exists(argv0):
+        return os.path.dirname(os.path.abspath(argv0))
+    return None
+
+
+def _path_without_shim() -> str:
+    """PATH with the shim's directory removed. Empty pieces are dropped too."""
+    self_dir = _shim_dir()
+    return os.pathsep.join(
+        p for p in os.environ.get("PATH", "").split(os.pathsep)
+        if p and (not self_dir or os.path.abspath(p) != self_dir)
+    )
+
+
 def _real_git() -> str | None:
-    """The real git binary: PATH with the shim's own directory removed, so we never
-    resolve back to ourselves. None if there is no other git on PATH."""
-    self_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-    parts = [p for p in os.environ.get("PATH", "").split(os.pathsep)
-             if p and os.path.abspath(p) != self_dir]
-    return shutil.which("git", path=os.pathsep.join(parts))
+    """The real git binary on PATH, never this shim. None if there is no other git."""
+    return shutil.which("git", path=_path_without_shim())
 
 
 def _carries_message(tok: str) -> bool:
@@ -79,7 +100,11 @@ def _is_plain_commit(args: list[str]) -> bool:
 
 
 def _exec_git(git: str, args: list[str]) -> int:
-    return subprocess.run([git, *args]).returncode
+    """Run the real git. The child PATH has the shim directory removed so a hook
+    that calls `git` cannot re-enter this process."""
+    env = os.environ.copy()
+    env["PATH"] = _path_without_shim()
+    return subprocess.run([git, *args], env=env).returncode
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -101,25 +126,31 @@ def main(argv: list[str] | None = None) -> int:
     import llm  # noqa: E402
     import message  # noqa: E402
 
-    checks.require_inside_work_tree()
+    # git_io and checks shell out to `git` by name. Drop the shim directory for
+    # that window only, then put PATH back so this process does not leak the change
+    # into the caller (tests, or a later command in the same interpreter).
+    saved_path = os.environ.get("PATH", "")
+    os.environ["PATH"] = _path_without_shim()
+    try:
+        checks.require_inside_work_tree()
 
-    staged = args[1:]                        # the commit flags, minus "commit"
-    stages_tracked = _stages_all(staged)
-    if not git_io.anything_to_commit(include_tracked=stages_tracked):
-        return _exec_git(git, args)          # nothing to do -> git's own no-op message
+        staged = args[1:]                        # the commit flags, minus "commit"
+        stages_tracked = _stages_all(staged)
+        if not git_io.anything_to_commit(include_tracked=stages_tracked):
+            return _exec_git(git, args)          # nothing to do -> git's own no-op message
 
-    diff = git_io.commit_preview_diff(include_tracked=stages_tracked)
-    subject = ""
-    for _ in range(2):
+        diff = git_io.commit_preview_diff(include_tracked=stages_tracked)
         subject = message.extract_subject(llm.generate_subject(diff))
-        if subject:
-            break
-    if not subject:
-        # Model gave us nothing usable: fall through to a normal git commit so the
-        # user still gets git's editor rather than a hard failure.
-        return _exec_git(git, args)
+        if not subject:
+            print("llm-git-commit: could not write a commit subject.", file=sys.stderr)
+            return 1
 
-    return _exec_git(git, ["commit", "-m", subject, *staged])
+        return _exec_git(git, ["commit", "-m", subject, *staged])
+    except checks.RepoError as exc:
+        print(f"llm-git-commit: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        os.environ["PATH"] = saved_path
 
 
 def _stages_all(args: list[str]) -> bool:

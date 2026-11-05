@@ -41,8 +41,10 @@ def test_assembles_streamed_subject_and_sends_prompt(monkeypatch):
     assert kw["stream"] is True
     assert kw["stop"] == ["\n"]
     assert kw["messages"][0]["content"] == llm.SYSTEM_PROMPT
-    assert "the diff" in kw["messages"][1]["content"]
-    assert llm.USER_PREAMBLE in kw["messages"][1]["content"]
+    # User turn is the diff alone. A preamble in this turn is what the small
+    # model used to echo back as the subject.
+    assert kw["messages"][1]["content"] == "the diff"
+    assert kw["temperature"] == 0
 
 
 def test_progress_bar_is_driven(monkeypatch):
@@ -69,24 +71,28 @@ def test_model_failure_returns_empty(monkeypatch):
     assert llm.generate_subject("d") == ""
 
 
-def test_model_path_uses_configuration(monkeypatch):
-    # huggingface_hub is a runtime-only dep (not in the test venv); inject a fake
-    # module so _model_path's deferred `from huggingface_hub import hf_hub_download`
-    # resolves to our capture without the real package installed.
-    import sys
-    import types
+def test_system_prompt_stays_short():
+    # A long prompt made the 1.5B model echo the instruction. Keep it one line.
+    assert len(llm.SYSTEM_PROMPT) < 200
+    assert "72" in llm.SYSTEM_PROMPT
+    assert "scope number" in llm.SYSTEM_PROMPT
 
-    captured = {}
 
-    def _fake_download(*, repo_id, filename):
-        captured.update(repo_id=repo_id, filename=filename)
-        return "/tmp/fake.gguf"
+def test_model_path_uses_a_local_file_and_does_not_download(tmp_path, monkeypatch):
+    gguf = tmp_path / "m.gguf"
+    gguf.write_bytes(b"x")
+    monkeypatch.setattr(llm, "_MIN_BYTES", 1)
+    monkeypatch.setattr(llm, "_local_file", lambda: gguf)
+    monkeypatch.setattr(llm, "_cached_hf", lambda: None)
 
-    fake = types.ModuleType("huggingface_hub")
-    fake.hf_hub_download = _fake_download
-    monkeypatch.setitem(sys.modules, "huggingface_hub", fake)
+    def _boom(dest):
+        raise AssertionError("downloaded")
+
+    monkeypatch.setattr(llm, "_download", _boom)
+    assert llm._model_path() == str(gguf)
+
+
+def test_download_url_follows_configuration(monkeypatch):
     monkeypatch.setenv("LLM_GIT_COMMIT_REPO", "me/r")
     monkeypatch.setenv("LLM_GIT_COMMIT_FILE", "m.gguf")
-
-    assert llm._model_path() == "/tmp/fake.gguf"
-    assert captured == {"repo_id": "me/r", "filename": "m.gguf"}
+    assert llm._download_url() == "https://huggingface.co/me/r/resolve/main/m.gguf"

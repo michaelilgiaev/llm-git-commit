@@ -1,4 +1,4 @@
-# Test-only requirements for the karen suite (installed into cache/venv by tests.sh).
+# Test-only requirements for the llm-git-commit suite (installed into cache/venv by tests.sh).
 # The suite is pure/offline: no runtime third-party deps, so pytest is all it needs.
 pytest==9.1.1
 iniconfig==2.3.0

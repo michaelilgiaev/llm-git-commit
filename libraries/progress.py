@@ -1,7 +1,7 @@
 """progress.py - a one-line "current/total" progress bar on stderr.
 
-Rendered on stderr so it never pollutes stdout (the commit subject path) and never
-lands in a pipe. Carriage-return in place, cleared when done. Zero dependencies.
+Rendered on stderr so it never pollutes stdout. Carriage-return in place, then
+one newline when done, so a later step cannot restart the same line.
 """
 
 from __future__ import annotations
@@ -23,6 +23,6 @@ def bar(current: int, total: int, *, prefix: str = "") -> None:
 
 
 def done() -> None:
-    """Clear the bar line so it leaves no trace once generation finishes."""
-    sys.stderr.write("\r\033[K")
+    """Finish the line. One bar, then a newline, so the next step cannot redraw it."""
+    sys.stderr.write("\n")
     sys.stderr.flush()

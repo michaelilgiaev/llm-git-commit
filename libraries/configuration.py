@@ -18,6 +18,13 @@ import os
 DEFAULT_REPO = "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
 DEFAULT_FILE = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
 
+# Every GGUF this tool may have downloaded. Uninstall removes these and no other
+# Hugging Face repos.
+KNOWN_REPOS = (
+    DEFAULT_REPO,
+    "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+)
+
 
 def model_repo() -> str:
     """Hugging Face repo id of the GGUF; $LLM_GIT_COMMIT_REPO overrides it."""

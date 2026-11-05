@@ -17,6 +17,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import commit_command  # noqa: E402  (after the sys.path bootstrap above)
 import configuration  # noqa: E402  (for the default-model name in usage)
+import uninstall  # noqa: E402
 from checks import RepoError  # noqa: E402
 
 PROG = "llm-git-commit"
@@ -31,12 +32,15 @@ the subject for the ALREADY-STAGED diff and commits it. `git commit -m "..."` an
 every other git command pass straight through to real git, untouched.
 
 USAGE:
-  {PROG} commit     Commit the ALREADY-STAGED diff with a model-written subject.
-                    Stages nothing -- `git add` first, like `git commit -m`. A clean
-                    no-op with nothing staged. (This is what the `git` shim calls.)
-  {PROG} help       This text.
+  {PROG} commit      Commit the ALREADY-STAGED diff with a model-written subject.
+                     Stages nothing -- `git add` first, like `git commit -m`. A clean
+                     no-op with nothing staged. (This is what the `git` shim calls.)
+  {PROG} --uninstall Remove the git shim, this command, the completion, the
+                     downloaded model, and this checkout's venv. The source
+                     checkout stays. A real git is never removed.
+  {PROG} help        This text.
 
-MODEL (local GGUF, fetched once from Hugging Face, then fully offline):
+MODEL (local GGUF, fetched once by download_llm.sh, then fully offline):
   default {configuration.DEFAULT_REPO}
           {configuration.DEFAULT_FILE}
 
@@ -56,6 +60,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if cmd == "commit":
             return commit_command.run()
+        if cmd in ("uninstall", "--uninstall"):
+            return uninstall.run()
         if cmd in ("help", "-h", "--help"):
             print(usage())
             return 0
