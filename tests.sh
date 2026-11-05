@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 #
-# karen -- test entry point. `bash tests.sh` is the ONE command.
+# llm-git-commit -- test entry point. `bash tests.sh` is the ONE command.
 #
 # Self-bootstrapping: creates cache/venv if missing, installs tests/requirements.txt into
 # it, runs pytest. Nothing global is touched; the venv is gitignored under cache/ (the same
 # scratch root compile.sh and clear.sh use). pip is skipped when requirements.txt is
 # unchanged.
 #
-# The tests are PURE and OFFLINE. They never hit the Anthropic API (a fake transport is
-# injected), never reach the network. Git IS exercised, but only against throwaway repos
-# created under pytest's tmp_path -- nothing in your real repos is ever touched or committed.
+# The tests are PURE and OFFLINE. They never load a GGUF and never reach the network (the
+# local model is faked). Git IS exercised, but only against throwaway repos created under
+# pytest's tmp_path -- nothing in your real repos is ever touched or committed.
 #
 # Any arguments are passed straight through to pytest, e.g.:
 #   bash tests.sh -k version        run only tests matching "version"

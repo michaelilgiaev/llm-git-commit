@@ -1,8 +1,8 @@
-"""git_io.py - thin, testable wrappers over the git plumbing `repo` needs.
+"""git_io.py - thin, testable wrappers over the git plumbing we need.
 
-Every git shell-out lives here so the command modules (message/version) stay pure
-logic and the tests can drive git through ONE surface. Each wrapper returns data
-(or raises RepoError via die); none print. Mirrors qvm's split of IO away from logic.
+Every git shell-out lives here so the command/shim modules stay pure logic and the
+tests can drive git through ONE surface. Each wrapper returns data (or raises
+RepoError via die); none print.
 """
 
 from __future__ import annotations
@@ -11,9 +11,8 @@ import subprocess
 
 from checks import die
 
-# How much of the staged diff we feed the model. The old aicommit capped the raw
-# diff at 6000 bytes after a --stat header; keep that -- haiku does not need more to
-# write one subject line, and a huge body only invites a reasoning preamble.
+# How much of the diff we feed the model. A small model needs no more than this to
+# write one subject line, and a huge body only invites a rambling preamble.
 _DIFF_BYTES = 6000
 
 
@@ -26,60 +25,47 @@ def _git(*args: str, check: bool = False) -> subprocess.CompletedProcess:
 
 
 def has_staged_changes() -> bool:
-    """True when something is staged (the only thing `repo commit` ever commits).
-
-    Mirrors `git diff --cached --quiet`: exit 1 means there IS a staged change.
-    """
+    """True when something is staged. Mirrors `git diff --cached --quiet`: exit 1
+    means there IS a staged change."""
     return _git("diff", "--cached", "--quiet").returncode != 0
 
 
+def anything_to_commit(*, include_tracked: bool) -> bool:
+    """True when a `git commit` would actually commit something: staged changes, or
+    (with include_tracked, the `-a` case) any tracked-file working-tree change. The
+    git-native counterpart to commit_preview_diff's emptiness."""
+    if has_staged_changes():
+        return True
+    return include_tracked and _git("diff", "--quiet").returncode != 0
+
+
 def staged_diff() -> str:
-    """The staged diff, shaped exactly as the old aicommit fed it: a `--stat`
-    summary, a separator, then the first _DIFF_BYTES of the full cached diff."""
+    """The staged diff: a `--stat` summary, a separator, then the first _DIFF_BYTES
+    of the full cached diff."""
+    return _shape(_git("--no-pager", "diff", "--cached", "--stat").stdout,
+                  _git("--no-pager", "diff", "--cached").stdout)
+
+
+def commit_preview_diff(*, include_tracked: bool) -> str:
+    """The diff the model should summarise for a `git commit`. Always the staged
+    (--cached) changes; with include_tracked=True (the `-a`/`--all` case, where git
+    also commits tracked-but-unstaged edits) the working-tree diff of tracked files
+    is appended so the subject reflects everything that will land."""
     stat = _git("--no-pager", "diff", "--cached", "--stat").stdout
     body = _git("--no-pager", "diff", "--cached").stdout
+    if include_tracked:
+        stat += _git("--no-pager", "diff", "--stat").stdout
+        body += _git("--no-pager", "diff").stdout
+    return _shape(stat, body)
+
+
+def _shape(stat: str, body: str) -> str:
     return f"{stat}\n---\n{body[:_DIFF_BYTES]}"
 
 
 def commit(message: str) -> None:
     """Commit the ALREADY-staged changes with `message`. Dies on a git failure."""
     _git("commit", "-m", message, check=True)
-
-
-def changes_since(ref: str) -> str:
-    """The commit log + diff since `ref` (a tag), shaped for the bump model: the
-    one-line subjects, a --stat, a separator, then the first _DIFF_BYTES of the diff.
-    An empty `ref` means "since the start of history" (no previous release tag), so
-    the whole history is summarised. Returns '' when there is nothing new since ref."""
-    rangespec = f"{ref}..HEAD" if ref else "HEAD"
-    log = _git("--no-pager", "log", "--pretty=format:- %s", rangespec).stdout
-    stat = _git("--no-pager", "diff", "--stat", rangespec).stdout
-    body = _git("--no-pager", "diff", rangespec).stdout
-    if not (log.strip() or body.strip()):
-        return ""
-    return f"Commits:\n{log}\n\nFiles:\n{stat}\n---\n{body[:_DIFF_BYTES]}"
-
-
-def list_version_tags() -> list[str]:
-    """Every tag that looks like a semver release tag (`v1.2.3`), newest-commit first.
-
-    We sort by tag crev-date via `git tag --sort`, but the CALLER decides the
-    latest by parsing versions (tag date is not version order); this just returns
-    the candidate tag names.
-    """
-    out = _git("tag", "--list", "v*").stdout
-    return [t for t in (line.strip() for line in out.splitlines()) if t]
-
-
-def tag_exists(name: str) -> bool:
-    return name in set(list_version_tags()) or bool(
-        _git("rev-parse", "--verify", "--quiet", f"refs/tags/{name}").stdout.strip()
-    )
-
-
-def create_annotated_tag(name: str, message: str) -> None:
-    """Create an annotated tag `name` with `message`. Dies if it already exists."""
-    _git("tag", "-a", name, "-m", message, check=True)
 
 
 def head_has_commits() -> bool:

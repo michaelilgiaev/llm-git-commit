@@ -1,10 +1,10 @@
-"""Shared pytest fixtures + import-path setup for the karen test suite.
+"""Shared pytest fixtures + import-path setup for the llm-git-commit test suite.
 
 `bash tests.sh` already puts libraries/ on PYTHONPATH, and pyproject.toml's pythonpath
 does the same for a bare `pytest` run. This conftest belt-and-suspenders it so the flat
 modules resolve no matter how the tests are launched, and provides a `git_repo` fixture:
 a throwaway git repository under tmp_path with a deterministic identity, so tests that
-exercise git_io/commit/version never touch a real repo.
+exercise git_io/commit never touch a real repo.
 """
 
 from __future__ import annotations
@@ -42,15 +42,7 @@ def git_repo(tmp_path, monkeypatch):
 
 @pytest.fixture()
 def staged_repo(git_repo):
-    """A git_repo with one file staged, ready for `karen commit`. Returns its Path."""
+    """A git_repo with one file staged, ready for a commit. Returns its Path."""
     (git_repo / "app.py").write_text("def hi():\n    return 'hi'\n")
     _git(git_repo, "add", "app.py")
-    return git_repo
-
-
-@pytest.fixture()
-def committed_repo(git_repo):
-    """A git_repo with one commit (so HEAD exists and tags can point at it), ready
-    for `karen version`. Returns its Path."""
-    _git(git_repo, "commit", "--allow-empty", "-q", "-m", "init")
     return git_repo

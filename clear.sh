@@ -15,8 +15,8 @@ Pass flags to clear only PART of the tree (flags combine):
   -c, --cache    clear only cache/  (also sweeps __pycache__ and .pytest_cache/)
   -h, --help     show this help and exit
 
-cache/ is karen's single scratch root: the Nuitka build cache AND the test/build
-venv live there, so clearing it forces a cold recompile and a fresh venv.
+cache/ is the single scratch root: the runtime/test venv lives there, so clearing
+it forces a fresh venv (and a re-download of requirements on next install).
 
 Examples:
   clear.sh            clear output/, logs/, cache/, __pycache__, .pytest_cache (all)

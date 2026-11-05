@@ -1,10 +1,10 @@
-# pytest configuration for the karen test suite.
+# pytest configuration for the llm-git-commit test suite.
 #
 # Driven by `bash tests.sh` (which builds cache/venv and sets PYTHONPATH); this config also
-# makes a bare `pytest` work from inside an activated venv. pythonpath below adds karen's
-# single import root (libraries/) so the flat modules (checks, git_io, message, ...) resolve
-# without any wrapper. Discovery is scoped to tests/. The suite is pure/offline -- it injects
-# a fake API transport and only ever drives throwaway git repos under tmp_path.
+# makes a bare `pytest` work from inside an activated venv. pythonpath below adds the single
+# import root (libraries/) so the flat modules (checks, git_io, message, ...) resolve without
+# any wrapper. Discovery is scoped to tests/. The suite is pure/offline -- it fakes the local
+# model (never loads a GGUF, never hits the network) and only drives throwaway git repos.
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]

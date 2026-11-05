@@ -8,10 +8,7 @@ from __future__ import annotations
 
 import subprocess
 
-import pytest
-
 import git_io
-from checks import RepoError
 
 
 def _git(repo, *args):
@@ -34,11 +31,31 @@ def test_staged_diff_contains_stat_and_body(staged_repo):
     assert "def hi" in diff          # the body carries the actual change
 
 
+def test_commit_preview_cached_only_ignores_unstaged(staged_repo):
+    # A tracked file changed but NOT staged: without include_tracked it must not
+    # appear; with it (the `-a` case) it must.
+    (staged_repo / "app.py").write_text("def hi():\n    return 'HELLO'\n")
+    _git(staged_repo, "add", "app.py")
+    _git(staged_repo, "commit", "-q", "-m", "base")
+    (staged_repo / "app.py").write_text("def hi():\n    return 'CHANGED'\n")  # unstaged
+
+    assert "CHANGED" not in git_io.commit_preview_diff(include_tracked=False)
+    assert "CHANGED" in git_io.commit_preview_diff(include_tracked=True)
+
+
+def test_anything_to_commit(staged_repo):
+    assert git_io.anything_to_commit(include_tracked=False) is True   # file is staged
+    git_io.commit("base")
+    assert git_io.anything_to_commit(include_tracked=False) is False  # clean tree now
+    (staged_repo / "app.py").write_text("def hi():\n    return 'X'\n")  # unstaged edit
+    assert git_io.anything_to_commit(include_tracked=False) is False  # not staged
+    assert git_io.anything_to_commit(include_tracked=True) is True    # -a would catch it
+
+
 def test_commit_records_message(staged_repo):
     git_io.commit("Add greeting helper")
     log = _git(staged_repo, "log", "--oneline", "-1").stdout
     assert "Add greeting helper" in log
-    # After committing, nothing is staged.
     assert git_io.has_staged_changes() is False
 
 
@@ -46,57 +63,3 @@ def test_head_has_commits_tracks_state(staged_repo):
     assert git_io.head_has_commits() is False
     git_io.commit("first")
     assert git_io.head_has_commits() is True
-
-
-def test_list_version_tags_filters_to_v_prefix(staged_repo):
-    git_io.commit("first")
-    _git(staged_repo, "tag", "v1.0.0")
-    _git(staged_repo, "tag", "v1.2.0")
-    _git(staged_repo, "tag", "nightly")          # not a v-tag
-    tags = set(git_io.list_version_tags())
-    assert tags == {"v1.0.0", "v1.2.0"}
-
-
-def test_create_annotated_tag_and_exists(staged_repo):
-    git_io.commit("first")
-    assert git_io.tag_exists("v1.0.0") is False
-    git_io.create_annotated_tag("v1.0.0", "Release v1.0.0")
-    assert git_io.tag_exists("v1.0.0") is True
-    # It is annotated (has a tag object), not lightweight.
-    kind = _git(staged_repo, "cat-file", "-t", "v1.0.0").stdout.strip()
-    assert kind == "tag"
-
-
-def test_create_duplicate_tag_dies(staged_repo):
-    git_io.commit("first")
-    git_io.create_annotated_tag("v1.0.0", "Release v1.0.0")
-    with pytest.raises(RepoError):
-        git_io.create_annotated_tag("v1.0.0", "Release v1.0.0")
-
-
-def test_changes_since_tag_carries_log_and_diff(staged_repo):
-    # Tag a baseline, then add a new commit on top; changes_since(tag) must surface
-    # the new commit's subject and its diff -- this is what the bump model reads.
-    git_io.commit("baseline")
-    _git(staged_repo, "tag", "v1.0.0")
-    (staged_repo / "feature.py").write_text("x = 1\n")
-    _git(staged_repo, "add", "feature.py")
-    git_io.commit("Add feature")
-
-    changes = git_io.changes_since("v1.0.0")
-    assert "Add feature" in changes          # the new commit subject (log)
-    assert "feature.py" in changes           # the --stat / diff body
-    assert "baseline" not in changes         # nothing from before the tag
-
-
-def test_changes_since_empty_when_nothing_new(staged_repo):
-    git_io.commit("baseline")
-    _git(staged_repo, "tag", "v1.0.0")
-    assert git_io.changes_since("v1.0.0") == ""     # no commits after the tag
-
-
-def test_changes_since_empty_ref_covers_whole_history(staged_repo):
-    # No previous tag -> ref="" -> summarise everything since the start of history.
-    git_io.commit("first")
-    changes = git_io.changes_since("")
-    assert "first" in changes

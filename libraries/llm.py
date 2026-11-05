@@ -1,35 +1,27 @@
-"""llm.py - the one call to the Anthropic Messages API that `repo commit` makes.
+"""llm.py - generate a commit subject with a LOCAL model, on the CPU.
 
-Replaces aicommit's curl + jq subprocess with stdlib urllib: JSON encoding and
-escaping come for free (the diff is full of quotes, newlines, backslashes -- the
-exact thing the bash version hand-escaped), and the runtime needs no curl/jq.
+No Anthropic API, no network at inference time: a small Qwen2.5-Instruct GGUF runs
+in-process via llama-cpp-python (CPU wheel, no GPU). The model file is fetched once
+from Hugging Face on first run (hf_hub_download) and cached; every run after is
+fully offline. This is the 1:1 replacement for the old cheap-haiku subject call.
 
-AUTH MODEL (unchanged from the standardized aicommit)
-  No native `claude` binary, no hypervisor. The key is read from the environment
-  at RUNTIME -- $ANTHROPIC_API, falling back to the conventional $ANTHROPIC_API_KEY
-  -- and sent as the x-api-key header. Nothing is ever baked into the binary.
+Generation is STREAMED so progress.bar can show tokens-generated / max_tokens. We
+stop at the first newline, so the reply is one line -- message.extract_subject is
+still the net for the rare preamble.
+
+The heavy imports (llama_cpp, huggingface_hub) are deferred into the functions that
+need them: importing this module (e.g. in the git shim's fast path, or in tests
+that stub generate_subject) must stay cheap and dependency-free.
 """
 
 from __future__ import annotations
 
-import json
 import os
-import urllib.error
-import urllib.request
 
+import configuration
+import progress
 from checks import die
 
-API_URL = "https://api.anthropic.com/v1/messages"
-ANTHROPIC_VERSION = "2023-06-01"
-
-
-def api_url() -> str:
-    """The Messages endpoint. $KAREN_API_URL overrides it -- useful for an API
-    gateway/proxy, and for tests that point at a local stub. Defaults to the real one."""
-    return os.environ.get("KAREN_API_URL", "").strip() or API_URL
-
-# The system prompt pins haiku to a pure one-line generator. message.extract_subject
-# is the SECONDARY net for when it ignores this on a large diff.
 SYSTEM_PROMPT = (
     "You are a git commit message generator. You receive a staged diff and output "
     "EXACTLY ONE line: the commit subject. Imperative mood, 72 characters or fewer, "
@@ -38,81 +30,76 @@ SYSTEM_PROMPT = (
 )
 USER_PREAMBLE = "Write the commit subject line for the staged changes below."
 
-# `karen version` with no part asks the model to decide the semver bump from the
-# commits/diff since the last tag. It must answer with ONE bare word so the caller
-# can map it straight onto version.PARTS.
-BUMP_SYSTEM_PROMPT = (
-    "You decide the Semantic Versioning bump for a release. You receive the commit "
-    "log and diff since the last release tag. Reply with EXACTLY ONE word, lowercase, "
-    "nothing else: 'major' for incompatible/breaking API changes, 'minor' for "
-    "backwards-compatible new features, 'patch' for backwards-compatible bug fixes or "
-    "internal changes. When unsure, prefer the smaller bump. Output only that one word."
-)
-BUMP_PREAMBLE = "Decide the semver bump for the changes since the last release below."
+# A subject is a handful of tokens; cap tight so a chatty small model cannot ramble
+# and the progress bar's denominator is meaningful.
+_MAX_TOKENS = 48
+
+_llama = None  # lazily built singleton (loading the GGUF costs ~1s; do it once)
 
 
-def api_key() -> str:
-    """The key from $ANTHROPIC_API or $ANTHROPIC_API_KEY, or '' if neither is set."""
-    return os.environ.get("ANTHROPIC_API") or os.environ.get("ANTHROPIC_API_KEY") or ""
+def _model_path() -> str:
+    """Resolve the GGUF to a local path, downloading it once if absent. $-overrides
+    in configuration pick the repo/file; hf_hub_download caches under ~/.cache."""
+    from huggingface_hub import hf_hub_download  # heavy; deferred
 
-
-def require_api_key() -> str:
-    key = api_key()
-    if not key:
-        die("$ANTHROPIC_API is not set (export it in ~/.bashrc).")
-    return key
-
-
-def _call(system: str, user: str, *, model: str, max_tokens: int,
-          timeout: float) -> str:
-    """One Messages-API round-trip: send `system`/`user`, return the concatenated
-    text content. An HTTP/network error or a content-less response returns '' so
-    every caller's empty-guard handles failure uniformly. The key is read from the
-    env (require_api_key) and sent as x-api-key; nothing is baked in."""
-    key = require_api_key()
-    body = json.dumps({
-        "model": model,
-        "max_tokens": max_tokens,
-        "system": system,
-        "messages": [{"role": "user", "content": user}],
-    }).encode("utf-8")
-
-    req = urllib.request.Request(
-        api_url(),
-        data=body,
-        method="POST",
-        headers={
-            "x-api-key": key,
-            "anthropic-version": ANTHROPIC_VERSION,
-            "content-type": "application/json",
-        },
-    )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+        return hf_hub_download(
+            repo_id=configuration.model_repo(),
+            filename=configuration.model_file(),
+        )
+    except Exception as exc:  # network/404/offline-first-run -> one clear message
+        die(f"could not fetch the model ({configuration.model_file()}): {exc}")
+
+
+def _load():
+    """Build the Llama singleton. Deferred import keeps module load cheap; verbose is
+    off so the native loader banner never mixes into our output."""
+    global _llama
+    if _llama is None:
+        from llama_cpp import Llama  # heavy; deferred
+
+        _llama = Llama(
+            model_path=_model_path(),
+            n_ctx=4096,
+            n_threads=os.cpu_count() or 4,
+            verbose=False,
+        )
+    return _llama
+
+
+def generate_subject(diff: str, *, model: str | None = None,
+                     max_tokens: int = _MAX_TOKENS) -> str:
+    """Stream a one-line commit subject for `diff` from the local model, drawing a
+    progress bar (tokens / max_tokens) on stderr. Returns the RAW text
+    (message.extract_subject cleans it); '' on any model failure.
+
+    `model` is accepted for call-site compatibility but ignored -- the model is
+    chosen by configuration/env, not per call."""
+    text = ""
+    n = 0
+    progress.bar(0, max_tokens, prefix="writing commit ")
+    try:
+        stream = _load().create_chat_completion(
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": f"{USER_PREAMBLE}\n\n{diff}"},
+            ],
+            max_tokens=max_tokens,
+            temperature=0.2,
+            stop=["\n"],
+            stream=True,
+        )
+        for chunk in stream:
+            choice = chunk["choices"][0]
+            piece = choice["delta"].get("content")
+            if piece:
+                text += piece
+                n += 1
+                progress.bar(n, max_tokens, prefix="writing commit ")
+            if choice.get("finish_reason") is not None:
+                break
+    except Exception:
         return ""
-
-    parts = [
-        block.get("text", "")
-        for block in payload.get("content", [])
-        if isinstance(block, dict) and block.get("type") == "text"
-    ]
-    return "".join(parts)
-
-
-def generate_subject(diff: str, *, model: str, max_tokens: int = 64,
-                     timeout: float = 30.0) -> str:
-    """Ask `model` for a commit subject for `diff`. Returns the model's RAW text
-    reply (message.extract_subject cleans it)."""
-    return _call(SYSTEM_PROMPT, f"{USER_PREAMBLE}\n\n{diff}",
-                 model=model, max_tokens=max_tokens, timeout=timeout)
-
-
-def suggest_bump(changes: str, *, model: str, max_tokens: int = 16,
-                 timeout: float = 30.0) -> str:
-    """Ask `model` which semver part to bump given `changes` (the log + diff since
-    the last tag). Returns the RAW reply; version_command maps it onto a part and
-    falls back on an unrecognisable answer."""
-    return _call(BUMP_SYSTEM_PROMPT, f"{BUMP_PREAMBLE}\n\n{changes}",
-                 model=model, max_tokens=max_tokens, timeout=timeout)
+    finally:
+        progress.done()
+    return text
