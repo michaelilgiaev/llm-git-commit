@@ -74,8 +74,25 @@ def test_rejects_non_subjects(reply):
 
 
 def test_rejects_prose_far_past_cap():
-    prose = "This change " + "word " * 40     # well over the 100-char cap
+    prose = "This change " + "word " * 90     # one clause, well over the cap
+    assert len(prose) > message._MAX_LEN
     assert message.extract_subject(prose) == ""
+
+
+def test_semicolon_clauses_pass_through():
+    line = "fix the short help; drop the extra space; test the wrapped flag"
+    assert message.extract_subject(line) == line
+
+
+def test_overlong_semicolon_line_keeps_whole_clauses():
+    clause = "fix the parser flag"
+    line = "; ".join([clause] * 40)
+    assert len(line) > message._MAX_LEN
+    out = message.extract_subject(line)
+    assert out.startswith(clause)
+    assert "; " in out
+    assert len(out) <= message._MAX_LEN
+    assert not out.endswith(";")
 
 
 def test_real_subject_slightly_over_72_is_kept():

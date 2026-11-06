@@ -9,12 +9,8 @@ from __future__ import annotations
 
 import subprocess
 
+import harness
 from checks import die
-
-# A short patch still fits in the prompt and names the actual change. Anything
-# longer is dropped: the 1.5B model then describes a file's text (the README)
-# instead of the commit, the cleaner rejects it, and the user lands in an editor.
-_PATCH_LIMIT = 800
 
 # Docs and images stay out of the patch even when it is short. Their prose is
 # exactly what the model copies back as the subject. The stat line still names them.
@@ -80,12 +76,11 @@ def commit_preview_diff(*, include_tracked: bool) -> str:
 
 
 def _shape(stat: str, body: str) -> str:
-    """Stat always. The patch only when it is short enough to help, not to distract."""
-    stat = stat.strip()
-    body = body.strip()
-    if body and len(body) <= _PATCH_LIMIT:
-        return f"{stat}\n---\n{body}"
-    return stat
+    """Fact card for Qwen. The draft line inside it is the commit fallback.
+
+    Raw unified diffs are not included. The 1.5B copies those back as the subject.
+    """
+    return harness.brief(stat.strip(), body.strip())
 
 
 def commit(message: str) -> None:

@@ -18,22 +18,28 @@ import urllib.request
 from pathlib import Path
 
 import configuration
+import digest
+import harness
+import message
 import progress
 from checks import RepoError, die
 
+# One physical line. Several changes are clauses split by "; ", in the order
+# they happen. A long prompt is echoed by the 1.5B, so this stays one sentence.
 SYSTEM_PROMPT = (
-    "Output one git commit subject. Imperative mood. At most 72 characters. "
-    "No quotes, no prefix, no scope number."
+    "Write one commit subject from these facts. Say what changed and why. "
+    "Keep '; ' between changes. No prefix, no quotes."
 )
 
-# A subject is a short line. The cap is the bar's total, so a ramble cannot
-# run the bar out and start over -- there is only this one pass.
-_MAX_TOKENS = 24
+# Enough for a few "; "-separated clauses. The cap is the bar's total, so a
+# ramble cannot run the bar out and start over -- there is only this one pass.
+_MAX_TOKENS = 96
 
 # A real GGUF is about a gigabyte. Anything smaller is a partial download.
 _MIN_BYTES = 1_000_000
 
 _llama = None  # lazily built singleton (loading the GGUF costs ~1s; do it once)
+last_reply = ""  # raw text from the most recent generation, before the fallback
 
 
 def _local_file() -> Path:
@@ -134,6 +140,14 @@ def _load():
     return _llama
 
 
+def _model_view(diff: str) -> str:
+    """Hide the draft. Qwen writes from the facts; the draft is only the fallback."""
+    if harness.draft_of(diff) is None:
+        return diff
+    rows = [row for row in diff.splitlines() if not row.lower().startswith("draft:")]
+    return "\n".join(rows) if rows else diff
+
+
 def generate_subject(diff: str, *, model: str | None = None,
                      max_tokens: int = _MAX_TOKENS) -> str:
     """One streamed subject for `diff`. The bar is tokens / max_tokens, drawn
@@ -148,14 +162,16 @@ def generate_subject(diff: str, *, model: str | None = None,
         raise
     except Exception:
         return ""
+    global last_reply
     text = ""
     n = 0
+    last_reply = ""
     progress.bar(0, max_tokens, prefix="writing commit ")
     try:
         stream = llama.create_chat_completion(
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": diff},
+                {"role": "user", "content": _model_view(diff)},
             ],
             max_tokens=max_tokens,
             temperature=0,
@@ -175,4 +191,11 @@ def generate_subject(diff: str, *, model: str | None = None,
         return ""
     finally:
         progress.done()
-    return text.strip()
+    # The harness wrote the line. Qwen may rephrase the fact card. A rephrase
+    # that drops the fact or invents a reason falls back to the draft.
+    last_reply = text.strip()
+    cleaned = message.extract_subject(last_reply)
+    draft = harness.draft_of(diff)
+    if draft is not None:
+        return harness.pick(cleaned, draft, diff)
+    return digest.choose(cleaned, diff)

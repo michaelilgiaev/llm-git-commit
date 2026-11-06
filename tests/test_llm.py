@@ -42,7 +42,7 @@ def test_assembles_streamed_subject_and_sends_prompt(monkeypatch):
     assert kw["stop"] == ["\n"]
     assert kw["messages"][0]["content"] == llm.SYSTEM_PROMPT
     # User turn is the diff alone. A preamble in this turn is what the small
-    # model used to echo back as the subject.
+    # model used to echo back as the subject. A fact card hides its draft line.
     assert kw["messages"][1]["content"] == "the diff"
     assert kw["temperature"] == 0
 
@@ -62,6 +62,18 @@ def test_progress_bar_is_driven(monkeypatch):
     assert done["n"] == 1                       # bar cleared exactly once
 
 
+def test_ungrounded_reply_falls_back_to_the_digest(monkeypatch):
+    line = "use git_exclude in dir.rs; then add isPlausibleWindowSize in screen.go"
+    monkeypatch.setattr(llm, "_load", lambda: _StubLlama(["e2e8e9d; 34"]))
+    assert llm.generate_subject(line) == line
+
+
+def test_grounded_rewrite_is_kept(monkeypatch):
+    line = "use git_exclude in dir.rs"
+    monkeypatch.setattr(llm, "_load", lambda: _StubLlama(["check git_exclude in dir.rs"]))
+    assert llm.generate_subject(line) == "check git_exclude in dir.rs"
+
+
 def test_model_failure_returns_empty(monkeypatch):
     class _Boom:
         def create_chat_completion(self, **kw):
@@ -72,10 +84,13 @@ def test_model_failure_returns_empty(monkeypatch):
 
 
 def test_system_prompt_stays_short():
-    # A long prompt made the 1.5B model echo the instruction. Keep it one line.
+    # A long prompt made the 1.5B model echo the instruction. Keep it one line,
+    # and pin the semicolon style the commit line is supposed to use.
     assert len(llm.SYSTEM_PROMPT) < 200
-    assert "72" in llm.SYSTEM_PROMPT
-    assert "scope number" in llm.SYSTEM_PROMPT
+    assert "'; '" in llm.SYSTEM_PROMPT
+    assert "No prefix" in llm.SYSTEM_PROMPT
+    assert "why" in llm.SYSTEM_PROMPT
+    assert "Keep every name" not in llm.SYSTEM_PROMPT
 
 
 def test_model_path_uses_a_local_file_and_does_not_download(tmp_path, monkeypatch):

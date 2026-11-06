@@ -32,9 +32,10 @@ _ACKS = (
     "Done", "Perfect", "Got it", "Great", "Understood", "Certainly", "Of course",
 )
 
-# The length cap. We ask for <=72 but only REJECT past 100 (a real subject a little
-# over 72 is fine; prose is far longer).
-_MAX_LEN = 100
+# One line of "; "-separated clauses. A single change can be short. A pile of
+# clauses is clipped at a clause boundary. An unsplittable ramble past the cap
+# is rejected (it is prose, not a commit line).
+_MAX_LEN = 360
 
 
 def _strip_wrappers(line: str) -> str:
@@ -46,6 +47,26 @@ def _strip_wrappers(line: str) -> str:
     return line[:-1] if line.endswith(".") else line
 
 
+def _fit(line: str) -> str:
+    """Keep the line when it fits. When it is a run of clauses, keep whole
+    clauses that fit. A single clause past the cap is prose and returns ''."""
+    if len(line) <= _MAX_LEN:
+        return line
+    kept = []
+    size = 0
+    for part in (p.strip() for p in line.split(";")):
+        if not part:
+            continue
+        extra = len(part) if not kept else len(part) + 2
+        if size + extra > _MAX_LEN:
+            break
+        kept.append(part)
+        size += extra
+    if not kept:
+        return ""
+    return "; ".join(kept)
+
+
 def _is_rejected(line: str) -> bool:
     """True when `line` is chatter/prose/a list item rather than a subject."""
     if line.endswith(":"):                      # lead-in to a list that followed
@@ -55,8 +76,6 @@ def _is_rejected(line: str) -> bool:
     if line[:2] in ("- ", "* ", "+ "):          # a single bullet, not the whole change
         return True
     if not re.search(r"[A-Za-z0-9]", line):     # punctuation debris (lone fence/dash)
-        return True
-    if len(line) > _MAX_LEN:                     # prose, not a subject
         return True
     return False
 
@@ -76,5 +95,5 @@ def extract_subject(reply: str) -> str:
         candidate = line                        # keep the last survivor
     if not candidate:
         return ""
-    candidate = _strip_wrappers(candidate)
-    return "" if _is_rejected(candidate) else candidate
+    candidate = _fit(_strip_wrappers(candidate))
+    return "" if (not candidate or _is_rejected(candidate)) else candidate

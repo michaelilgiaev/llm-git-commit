@@ -24,20 +24,18 @@ def test_staged_changes_detected(staged_repo):
     assert git_io.has_staged_changes() is True
 
 
-def test_staged_diff_contains_stat_and_body(staged_repo):
+def test_staged_diff_names_the_added_function(staged_repo):
     diff = git_io.staged_diff()
-    assert "app.py" in diff          # the --stat names the file
-    assert "---" in diff             # the separator between stat and body
-    assert "def hi" in diff          # a short patch carries the actual change
+    assert "app.py" in diff
+    assert "hi" in diff
+    assert "def hi():" not in diff   # the model reads a line, not the patch
 
 
-def test_long_patch_is_dropped():
-    # The failure mode: a big patch (this repo's README) makes the model copy
-    # file text and the cleaner then rejects it.
-    text = git_io._shape("README.md | 64 +-\n", "Write " + ("x" * 2000))
+def test_long_patch_is_not_copied_verbatim():
+    # A wall of file text used to come back as the commit line.
+    text = git_io._shape("README.md | 64 +-\n", "Write " + ("x" * 4000))
     assert "README.md" in text
     assert "xxxx" not in text
-    assert "---" not in text
 
 
 def test_readme_prose_is_not_fed_to_the_model(git_repo):

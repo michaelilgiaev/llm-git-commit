@@ -25,7 +25,8 @@ PROG = "llm-git-commit"
 
 def usage() -> str:
     return f"""\
-{PROG} - write a git commit subject with a small LOCAL model (no API, runs on CPU).
+{PROG} - write a one-line commit message with a small LOCAL model (no API, runs on CPU).
+Several changes are clauses split by '; '.
 
 Installed as a `git` shim, a bare `git commit` (no -m/-F/-c/--amend/...) generates
 the subject for the ALREADY-STAGED diff and commits it. `git commit -m "..."` and

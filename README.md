@@ -2,7 +2,7 @@
   <img src="assets/llm-git-commit_title_627x230.png" alt="llm-git-commit">
 </p>
 
-Installed as a `git` shim, a bare `git commit` with no message writes the subject for the already staged diff with a small language model that runs entirely on your CPU, then commits. Everything else, including `git commit -m "..."`, passes straight through to real git. No API key, no network at commit time. A progress bar shows while the model writes. Keep this checkout in place; the installed commands run from it. Remove everything with `llm-git-commit --uninstall`.
+Installed as a `git` shim, a bare `git commit` with no message writes one line for the already staged diff with a small language model that runs entirely on your CPU, then commits. Several changes are clauses split by `; `. Everything else, including `git commit -m "..."`, passes straight through to real git. No API key, no network at commit time. A progress bar shows while the model writes. Keep this checkout in place; the installed commands run from it. Remove everything with `llm-git-commit --uninstall`.
 
 ## Setup
 
