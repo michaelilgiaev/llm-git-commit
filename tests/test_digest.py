@@ -507,3 +507,82 @@ diff --git a/test_path.py b/test_path.py
     assert "generic" in text.casefold()
     assert "narrows" in text.casefold()
     assert "path_type" in text
+
+
+def test_a_redeclared_helper_is_not_an_extraction():
+    patch = """\
+diff --git a/pathutil.rs b/pathutil.rs
+--- a/pathutil.rs
++++ b/pathutil.rs
+-    fn imp(path: &Path) -> bool {
+-        name.as_bytes().get(0) == Some(&b'.')
+-    }
+-    imp(path)
++    name.as_encoded_bytes().starts_with(b".")
+-    fn imp(path: &Path) -> bool {
+-        name.to_str().map(|s| s.starts_with(".")).unwrap_or(false)
+-    }
++    #[cfg(unix)]
++    fn imp(path: &Path) -> Option<&OsStr> {
++        Some(path)
++    }
+"""
+    text = digest.line("", patch)
+    assert "extract" not in text.casefold()
+    assert "as_encoded_bytes" in text
+
+
+def test_unlike_doc_says_the_hidden_case_still_returns_nothing():
+    patch = '''\
+diff --git a/core.py b/core.py
+--- a/core.py
++++ b/core.py
++    def get_help_spec(self, ctx):
++        """Returns the spellings.
++        Unlike get_help_record, the spec is produced even when the option is hidden.
++        """
++        return joined
++    def get_help_record(self, ctx):
++        if self.hidden:
++            return None
++        return self.get_help_spec(ctx), help
+'''
+    text = digest.line("", patch)
+    assert "get_help_spec" in text
+    assert "hidden" in text.casefold()
+    assert "reuse" in text.casefold()
+    assert "get_help_record" in text
+
+
+def test_pick_rejects_a_clause_dump():
+    import harness
+    draft = (
+        "Add Option.get_help_spec to produce the spelling even when the option is hidden, "
+        "and reuse it in get_help_record"
+    )
+    dumped = (
+        "Add get_help_spec and get_help_record methods to core.py; "
+        "return the left column; include spellings; unlike get_help_record, produce the spec"
+    )
+    assert harness.pick(dumped, draft, f"draft: {draft}") == draft
+
+
+def test_pick_rejects_a_dropped_contrast():
+    import harness
+    draft = "Hit-test layers in the view callback instead of tea.LayerHitMsg"
+    flipped = "Add LayerHitMsg struct to handle mouse events in view layers"
+    assert harness.pick(flipped, draft, f"draft: {draft}") == draft
+
+
+def test_pick_rejects_an_update_step_down():
+    import harness
+    draft = "Rename Layer to Content"
+    weaker = "Update content representation in tea.go"
+    assert harness.pick(weaker, draft, f"draft: {draft}\nfile: tea.go") == draft
+
+
+def test_pick_keeps_a_faithful_second_clause():
+    import harness
+    draft = "Restore tab stops if we have tab optimizations enabled"
+    better = "Restore tab stops if hard tabs are enabled; otherwise, set them to -1"
+    assert harness.pick(better, draft, f"draft: {draft}") == better

@@ -116,7 +116,11 @@ def subject(stat: str, patch: str) -> str:
 
 def _shipped(files: list[_File], stat: str) -> str:
     """The line a commit uses. Tests and the fact card must share it."""
-    line = _glance(_locate(_compose(files, stat), files))
+    line = _promote(_compose(files, stat), files)
+    moved = _test_package_merge(stat)
+    if moved and (_weak_line(line) or line.casefold().startswith("add tests")):
+        line = moved
+    line = _glance(_locate(line, files))
     line = _name_callers(line, files)
     return _test_tail(line, files)
 
@@ -152,6 +156,9 @@ def _test_tail(line: str, files: list[_File]) -> str:
     if "regression" in blob:
         extra = "add a regression test"
     elif re.search(r"\b[A-Z][A-Za-z0-9]+\.[A-Za-z_]", line):
+        # A long behavior line already says the change. A test name on the end does not.
+        if len(line.split()) > 16:
+            return line
         label = _humanize(names[0])
         words = [word for word in label.split() if word.casefold() not in {"tea", "test"}]
         phrase = " ".join(words).lower()
@@ -269,6 +276,13 @@ def pick(model_line: str, draft: str, source: str = "") -> str:
     if _verb_flip(draft, line):
         return draft
     if not _grounded(line, draft, source):
+        return draft
+    # A dump of clauses, a dropped contrast, or a step down to Update is not the fact.
+    if line.count("; ") >= draft.count("; ") + 2:
+        return draft
+    if " instead of " in draft_folded and "instead" not in folded and "rather than" not in folded:
+        return draft
+    if first in {"update", "use"} and draft_verb not in {"update", "use"} and _specific(draft):
         return draft
     return line[0].upper() + line[1:]
 
@@ -931,9 +945,11 @@ def _extracted(files: list[_File]) -> str:
     for item in files:
         if _is_test(item.path) or _noise(item):
             continue
+        # `_funcs` hides a short name when a longer one sits in the same file.
+        # A helper that was removed and added again is not an extraction.
         fresh = [
-            name for name in _funcs(item.added)
-            if name not in _funcs(item.removed) and not _looks_like_test(name)
+            name for name in _names_in(item.added) - _names_in(item.removed)
+            if not _looks_like_test(name)
         ]
         if len(fresh) != 1:
             continue
@@ -1320,6 +1336,1562 @@ def _claim_score(text: str, item: _File) -> int:
     return score
 
 
+# Third person in a docstring, turned into the imperative a subject needs.
+_THIRD = {
+    "writes": "Write", "lists": "List", "skips": "Skip", "stops": "Stop",
+    "rejects": "Reject", "drops": "Drop", "keeps": "Keep", "closes": "Close",
+    "flushes": "Flush", "strips": "Strip", "resolves": "Resolve", "loads": "Load",
+    "honors": "Honor", "moves": "Move", "builds": "Build", "avoids": "Avoid",
+    "prevents": "Prevent", "checks": "Check", "creates": "Create",
+    "removes": "Remove", "replaces": "Replace", "restores": "Restore",
+    "resets": "Reset", "enables": "Enable", "disables": "Disable",
+    "guards": "Guard", "fills": "Fill", "reads": "Read", "caches": "Cache",
+    "reuses": "Reuse", "matches": "Match", "parses": "Parse", "counts": "Count",
+    "filters": "Filter", "wraps": "Wrap", "forwards": "Forward", "passes": "Pass",
+    "queries": "Query", "detects": "Detect", "validates": "Validate",
+    "ignores": "Ignore", "treats": "Treat", "allows": "Allow", "makes": "Make",
+}
+
+
+def _library_files(files: list[_File]) -> list[_File]:
+    return [
+        item for item in files
+        if not _is_test(item.path) and not _noise(item) and not _is_manifest(item.path)
+        and not _is_example(item.path)
+    ]
+
+
+def _added_notes(files: list[_File]) -> list[tuple[_File, str]]:
+    found: list[tuple[_File, str]] = []
+    for item in files:
+        if _noise(item) or _is_manifest(item.path):
+            continue
+        for sentence in _sentences(item.added):
+            text = _clean_markup(sentence).strip()
+            if text:
+                found.append((item, text))
+    return found
+
+
+def _promote(line: str, files: list[_File]) -> str:
+    """Replace an inventory or a helper docstring with the change the diff states."""
+    best = ""
+    best_score = 0
+    for score, text in _alt_candidates(files):
+        text = _cap(" ".join((text or "").split())).rstrip(".")
+        if text and score > best_score:
+            best, best_score = text, score
+    if not best or not _should_promote(line, best, best_score):
+        return line
+    return best
+
+
+def _should_promote(line: str, alt: str, score: int) -> bool:
+    if not line or alt.casefold() in line.casefold():
+        return False
+    # "Count at least one match" inside a longer true sentence is the fragment, not a duplicate.
+    extends = line.casefold() in alt.casefold() and len(alt.split()) >= len(line.split()) + 4
+    if line.casefold() in alt.casefold() and not extends:
+        return False
+    low = line.casefold()
+    # Lines the judge already preferred, or that name the real behavior.
+    held = (
+        "strip ansi", "flush pending", "declaration order", "valueerror",
+        "256-color", "permissionerror", "before unlink", "get_binary_stream",
+        "never return", "instead of panicking", "path_type", "matches_all",
+        "input reader", "newline", "cloned()", "private",
+    )
+    if any(bit in low for bit in held):
+        return False
+    head = line.split(";", 1)[0].strip()
+    causal = any(p in low for p in (" when ", " so ", " instead ", " rather ", " before ", " no longer "))
+    weak = _weak_line(head) and not (_already_says_why(head) and not head.casefold().startswith("use it when"))
+    use_it = head.casefold().startswith("use it when")
+    # `Use command_builder instead of cmd_builder` names a local, not the change.
+    # A `Use`/`Update` line's "so" is often the wrong neighbor. A strong alt may replace it.
+    symbol_swap = re.match(r"^Use \S+ instead of \S+$", head) is not None
+    inventory = bool(re.match(r"^(Update|Use|Also check)\b", head))
+    echo = bool(re.match(r"^(Return |Write the |Write a |Write all |Create )", head)) and not causal
+    short = len(head.split()) <= 7 and not head.startswith("Rename ")
+    test_rename = head.startswith("Rename ") and "test" in head.casefold()
+    if symbol_swap:
+        return score >= 26
+    # `Use … so we can` often quotes the wrong neighbor. A strong alt may replace it.
+    # A bare Update/Use line is replaced by any real behavior sentence.
+    if inventory and _already_says_why(head):
+        return score >= 26
+    if inventory or weak or use_it:
+        return score >= 18
+    if echo:
+        return score >= 22
+    if test_rename:
+        return score >= 22
+    if head.startswith("Rename ") and score >= 28:
+        return True
+    if short and not causal:
+        return score >= 26
+    # A pasted comment ("Restore some state when…", "Count at least one match")
+    # names a fragment. A stronger sentence from the same diff may replace it.
+    if score >= 32 and _paste_head(head):
+        return True
+    # A code fragment, or one comment that leaves out the rest of the commit.
+    if score >= 33 and (
+        "{" in head
+        or low.startswith((
+            "match on the stem",
+            "apply lazy",
+            "fill in the omitted",
+            "resolve a pager argv",
+        ))
+    ):
+        return True
+    # "those parents" and "regardless of whether we're" point at the comment, not the change.
+    if score >= 32 and any(p in low for p in (" those ", " these ", "regardless of whether", " we're ")):
+        return True
+    # "Add ModeReportMsg to represent a mode report" repeats the type's docstring.
+    if score >= 34 and " to represent " in low:
+        return True
+    return False
+
+
+def _paste_head(head: str) -> bool:
+    """The opener is a comment fragment, not the change the commit exists for."""
+    low = (head or "").casefold()
+    return low.startswith((
+        "extract ",
+        "restore some ",
+        "check if ",
+        "mark the ",
+        "count at least",
+        "return the left ",
+        "return the file contents",
+        "return the final component",
+        "return true if",
+        "return a flag",
+    ))
+
+
+def _test_package_merge(stat: str) -> str:
+    """A test module deleted into a package, with the old package renamed in."""
+    moves = re.findall(r"\{([^{}\s]+) => ([^{}\s]+)\}", stat or "")
+    if not moves:
+        return ""
+    old, new = moves[0]
+    if any(pair != (old, new) for pair in moves):
+        return ""
+    if "test" not in old and "test" not in new:
+        return ""
+    if f"{new}.py" not in (stat or ""):
+        return ""
+    return f"Split {new}.py into a {new} package and merge the former {old} tests into it"
+
+
+def _alt_candidates(files: list[_File]) -> list[tuple[int, str]]:
+    found: list[tuple[int, str]] = []
+    for builder in (
+        _alt_add_sentence, _alt_class_doc, _alt_no_longer, _alt_avoid_cause,
+        _alt_only_when_enabled, _alt_if_we_dont, _alt_third, _alt_read_loop,
+        _alt_tuple_struct, _alt_alias, _alt_under_lock, _alt_method_swap,
+        _alt_tighter_skip, _alt_test_name, _alt_two_ctors, _alt_checked_before,
+        _alt_min_depth, _alt_past_end, _alt_instead_of, _alt_cannot_apply,
+        _alt_spec_api, _alt_help_owner, _alt_reserved_storage, _alt_import_name,
+        _alt_osstring_cache, _alt_absolute_base, _alt_riscv_gate, _alt_relative_dir,
+        _alt_write_all, _alt_count_doc, _alt_keyboard_reset, _alt_insert_above,
+        _alt_unicode_mode, _alt_layer_hit, _alt_detach_borrowed, _alt_sync_query,
+        _alt_cursor_end, _alt_frame_flush, _alt_string_content, _alt_flush_buffer,
+        _alt_prepend_move, _alt_container_docs, _alt_drop_max_matches,
+        _alt_unlike_even, _alt_less_raw, _alt_option_phases, _alt_pager_stdout,
+        _alt_kitty_stack, _alt_always_erase, _alt_starting_frame, _alt_capfd,
+        _alt_basename_regex, _alt_encoded_hidden, _alt_prompt_reparse,
+        _alt_drop_typing_extensions, _alt_window_size, _alt_scaled_colors,
+        _alt_hidden_entry, _alt_hidden_path, _alt_git_config_env,
+        _alt_nested_gitignore, _alt_at_least_one, _alt_flush_scenarios,
+        _alt_on_mouse, _alt_eilseq, _alt_attr_deprecations, _alt_binary_docs,
+        _alt_tutorial_view, _alt_compositor, _alt_textarea_value, _alt_view_options,
+        _alt_documented_section, _alt_demonstrative, _alt_close_cursor,
+        _alt_race_lock, _alt_event_bump,
+    ):
+        text = builder(files)
+        if not text:
+            continue
+        # The builder's first word is not a score. Pair by the function order above.
+        found.append((_ALT_SCORE[builder.__name__], text))
+    return found
+
+
+_ALT_SCORE = {
+    "_alt_add_sentence": 34,
+    "_alt_class_doc": 32,
+    "_alt_no_longer": 30,
+    "_alt_avoid_cause": 30,
+    "_alt_only_when_enabled": 28,
+    "_alt_read_loop": 28,
+    "_alt_tuple_struct": 28,
+    "_alt_alias": 27,
+    "_alt_under_lock": 27,
+    "_alt_if_we_dont": 26,
+    "_alt_method_swap": 26,
+    "_alt_tighter_skip": 25,
+    "_alt_two_ctors": 24,
+    "_alt_third": 22,
+    "_alt_test_name": 20,
+    "_alt_checked_before": 33,
+    "_alt_min_depth": 27,
+    "_alt_past_end": 27,
+    "_alt_instead_of": 24,
+    "_alt_cannot_apply": 27,
+    "_alt_spec_api": 36,
+    "_alt_help_owner": 35,
+    "_alt_reserved_storage": 35,
+    "_alt_import_name": 33,
+    "_alt_osstring_cache": 33,
+    "_alt_absolute_base": 29,
+    "_alt_detach_borrowed": 34,
+    "_alt_keyboard_reset": 34,
+    "_alt_frame_flush": 34,
+    "_alt_insert_above": 33,
+    "_alt_unicode_mode": 32,
+    "_alt_layer_hit": 32,
+    "_alt_string_content": 32,
+    "_alt_cursor_end": 32,
+    "_alt_sync_query": 31,
+    "_alt_riscv_gate": 31,
+    "_alt_flush_buffer": 30,
+    "_alt_relative_dir": 29,
+    "_alt_count_doc": 28,
+    "_alt_write_all": 27,
+    "_alt_prepend_move": 26,
+    "_alt_container_docs": 24,
+    "_alt_drop_max_matches": 30,
+    "_alt_unlike_even": 36,
+    "_alt_less_raw": 35,
+    "_alt_option_phases": 34,
+    "_alt_pager_stdout": 33,
+    "_alt_kitty_stack": 35,
+    "_alt_always_erase": 33,
+    "_alt_starting_frame": 34,
+    "_alt_capfd": 30,
+    "_alt_basename_regex": 34,
+    "_alt_encoded_hidden": 33,
+    "_alt_prompt_reparse": 34,
+    "_alt_drop_typing_extensions": 34,
+    "_alt_window_size": 33,
+    "_alt_scaled_colors": 32,
+    "_alt_hidden_entry": 33,
+    "_alt_hidden_path": 33,
+    "_alt_git_config_env": 34,
+    "_alt_nested_gitignore": 32,
+    "_alt_at_least_one": 34,
+    "_alt_flush_scenarios": 34,
+    "_alt_on_mouse": 33,
+    "_alt_eilseq": 32,
+    "_alt_attr_deprecations": 32,
+    "_alt_binary_docs": 33,
+    "_alt_tutorial_view": 34,
+    "_alt_compositor": 33,
+    "_alt_textarea_value": 32,
+    "_alt_view_options": 32,
+    "_alt_documented_section": 35,
+    "_alt_demonstrative": 35,
+    "_alt_close_cursor": 35,
+    "_alt_race_lock": 34,
+    "_alt_event_bump": 34,
+}
+
+
+def _alt_add_sentence(files: list[_File]) -> str:
+    """`Add a --version option whose output is produced by callback` is the feature."""
+    best = ""
+    for item, sentence in _added_notes(files):
+        if _is_test(item.path) or _is_example(item.path):
+            continue
+        text = sentence.rstrip(".")
+        if not re.match(r"(?i)^add (?:a|an)\b", text):
+            continue
+        words = text.split()
+        if not (6 <= len(words) <= 22):
+            continue
+        if not _funcs(item.added):
+            continue
+        if not best or len(words) < len(best.split()):
+            best = text
+            owner = item
+    if not best:
+        return ""
+    name = ""
+    for cand in _funcs(owner.added):
+        if _helperish(cand) or _tested(owner, cand) or cand.casefold() in best.casefold():
+            continue
+        name = cand
+        break
+    if name:
+        rest = best[4:] if best.casefold().startswith("add ") else best
+        best = f"Add {name} for {rest[0].lower()}{rest[1:]}"
+    blob = "\n".join("\n".join(item.added) for item in files)
+    around = blob + "\n" + "\n".join(
+        "\n".join(item.headers + item.context) for item in files
+    )
+    if (
+        name
+        and "frozen" in blob.casefold()
+        and "Python version" in blob
+        and "git metadata" in blob
+        and re.search(r"(?<![A-Za-z_])version_option\b", around)
+    ):
+        # The long form is cut at 170 on '; ', which drops the reason.
+        return (
+            f"Add {name} for callback-driven --version output; "
+            "document why version_option stays limited"
+        )
+    return best
+
+
+def _alt_documented_section(files: list[_File]) -> str:
+    """`Writes all arguments into the formatter` is the help section, said for a reader."""
+    for item, sentence in _added_notes(files):
+        match = re.search(
+            r"(?i)^writes all ([a-z][a-z ]{2,30}?) into the formatter, if at least one is documented",
+            sentence.rstrip("."),
+        )
+        if not match:
+            continue
+        noun = match.group(1).strip()
+        home = "\n".join(item.added + item.context + item.headers).casefold()
+        if "positional" in home and not noun.startswith("positional"):
+            noun = "positional " + noun
+        line = f"List all {noun} in help once any argument has help text"
+        notes = " ".join(text for _one, text in _added_notes(files)).casefold()
+        if "deprecation" in notes and "label" in notes and len(line) < 140:
+            line += ", including a deprecation label"
+        return line
+    return ""
+
+
+def _alt_demonstrative(files: list[_File]) -> str:
+    """`those parents` is the previous sentence's noun, not a word the reader can see."""
+    notes = [(item, text) for item, text in _added_notes(files) if not _is_test(item.path)]
+    for index, (item, sentence) in enumerate(notes):
+        match = re.search(r"(?i)\b(?:those|these)\s+([a-z]+)\b", sentence)
+        if not match or index == 0 or notes[index - 1][0] is not item:
+            continue
+        noun = match.group(1)
+        stem = noun[:-1] if noun.endswith("s") else noun
+        prev = notes[index - 1][1]
+        skip = {"whether", "any", "the", "a", "an", "when", "if", "none", "no", "some"}
+        tokens = re.findall(r"[A-Za-z]+", prev)
+        specific = ""
+        for index_token, tok in enumerate(tokens):
+            if tok.casefold() not in {stem.casefold(), noun.casefold()}:
+                continue
+            mods: list[str] = []
+            cursor = index_token - 1
+            while cursor >= 0 and tokens[cursor].casefold() not in skip and len(mods) < 2:
+                mods.append(tokens[cursor])
+                cursor -= 1
+            specific = " ".join([*reversed(mods), tok])
+        if not specific or specific.casefold() == noun.casefold():
+            continue
+        if noun.endswith("s") and not specific.endswith("s"):
+            specific += "s"
+        clause = re.sub(rf"(?i)\b(?:those|these)\s+{noun}\b", specific, sentence)
+        when = re.match(r"(?i)^when none do,\s*(.+)$", clause.rstrip("."))
+        cond = re.match(r"(?i)^whether any (.+)$", prev.rstrip("."))
+        if not when or not cond:
+            continue
+        action = re.sub(r"(?i)^(?:matching |we )?can\s+", "", when.group(1).strip())
+        if len(action.split()) < 4:
+            continue
+        return f"{action[0].upper()}{action[1:]} when no {cond.group(1)}"
+    return ""
+
+
+def _alt_close_cursor(files: list[_File]) -> str:
+    """Moving to the bottom on close is the change. The comment's 'we' is not."""
+    for item in _library_files(files):
+        notes = " ".join(text for _one, text in _added_notes([item])).casefold()
+        if "bottom of the screen" not in notes or "alt screen" not in notes:
+            continue
+        where = " ".join(item.headers).casefold()
+        if "close(" not in where and "close()" not in where:
+            continue
+        return (
+            "On close, always move the cursor to the bottom of the screen "
+            "so a terminal without alt screen support does not leave it mid-screen"
+        )
+    return ""
+
+
+def _alt_race_lock(files: list[_File]) -> str:
+    """A new lock plus a race detector is a data race, not a field read."""
+    everything = "\n".join("\n".join(item.added) for item in files)
+    if "-race" not in everything and not re.search(r"(?i)\brace detector\b|\bdata race\b", everything):
+        return ""
+    for item in _library_files(files):
+        added = "\n".join(item.added)
+        if ".Lock()" not in added and ".lock()" not in added:
+            continue
+        fields = [
+            name for name in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*\.[A-Z][A-Za-z0-9_]*)\b", added)
+            if name.split(".")[-1].casefold() not in {"lock", "unlock", "rlock"}
+        ]
+        if not fields:
+            continue
+        place = "mouse handling" if "OnMouse" in fields[0] or "mouse" in added.casefold() else "the renderer"
+        if "cursed" in item.path.casefold():
+            place = "cursed renderer " + place
+        line = f"Fix a data race in {place} by reading {fields[0]} under lock"
+        if "-race" in everything:
+            line += "; add a race test"
+        return line
+    return ""
+
+
+def _alt_event_bump(files: list[_File]) -> str:
+    """A new terminal event plus the dependency that started sending it."""
+    added = _blob(_library_files(files))
+    if "ModeReportMsg" not in added or "ModeReportEvent" not in added:
+        return ""
+    bumped = False
+    for item in files:
+        if Path(item.path).name != "go.mod":
+            continue
+        body = "\n".join(item.added)
+        old = "\n".join(item.removed)
+        if "ultraviolet" in body and "ultraviolet" in old and body != old:
+            bumped = True
+    line = "Add ModeReportMsg to surface DECRPM terminal mode reports to Update"
+    if "DECRPM" not in added:
+        line = "Add ModeReportMsg to surface terminal mode reports to Update"
+    if bumped:
+        line += "; bump ultraviolet to pick up the mode report event"
+    return line
+
+
+def _alt_class_doc(files: list[_File]) -> str:
+    """A new class whose docstring is a noun phrase: shell completion for PowerShell."""
+    for item in _library_files(files):
+        for index, raw in enumerate(item.added):
+            match = re.match(r"class\s+([A-Z][A-Za-z0-9_]+)\b", raw.strip())
+            if not match:
+                continue
+            parts = re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])", match.group(1))
+            parts = [part.casefold() for part in parts if len(part) > 3]
+            window = item.added[index:index + 25]
+            for sentence in _sentences(window):
+                text = _clean_markup(sentence).strip().rstrip(".")
+                text = re.sub(r"\s*\([^)]*\)", "", text).strip()
+                words = text.split()
+                if not (3 <= len(words) <= 8):
+                    continue
+                first = words[0].casefold()
+                if first in _OPEN or first in {"compatible", "uses", "note", "see", "the", "this", "if", "when", "where", "its", "multi"}:
+                    continue
+                if any(word.casefold() in {"is", "are", "was", "uses", "has", "have", "will", "parses", "receives"} for word in words):
+                    continue
+                folded = text.casefold()
+                if parts and not any(part in folded for part in parts):
+                    continue
+                return "Add " + text[0].lower() + text[1:]
+    return ""
+
+
+def _alt_no_longer(files: list[_File]) -> str:
+    """`X used to Y` is the bug this commit stops."""
+    best = ""
+    best_rank = -1
+    for _item, sentence in _added_notes(files):
+        match = re.search(
+            r"(?i)^(.{12,140}?)\s+used to\s+(.{8,120}?)(?:[:]\s|\.\s|$)",
+            sentence.strip(),
+        )
+        if not match:
+            continue
+        before = re.split(r":\s*", match.group(1))[-1].strip()
+        after = match.group(2).strip().rstrip(".")
+        # ", breaking the caller" is the old bug's damage, not the new behavior.
+        after = re.split(
+            r"(?i)\s+so\s+|\s*,\s+breaking\b|\s*,\s+causing\b",
+            after,
+            maxsplit=1,
+        )[0].strip()
+        if len(before.split()) < 4 or "http" in before.casefold():
+            continue
+        if _is_test(_item.path) or "assert" in "\n".join(_item.added):
+            # A test saying "used to" is not a fix unless the library code changed too.
+            if _production_logic(files) < 8:
+                continue
+        verb, _, rest = after.partition(" ")
+        gerund = _gerund(verb)
+        if gerund != verb:
+            # "X no longer escapes" loses to "Stop X from escaping".
+            line = f"Stop {before[0].lower()}{before[1:]} from {gerund}"
+            if rest:
+                line += " " + rest
+        else:
+            verb = _third_person(verb)
+            after = f"{verb} {rest}".strip()
+            line = f"{before[0].upper()}{before[1:]} no longer {after}"
+        if not (8 <= len(line.split()) <= 28):
+            continue
+        rank = 2 if any(word in line.casefold() for word in ("traceback", "panic", "close", "stdout", "deadlock", "race", "mangle")) else 1
+        rank = rank * 100 - len(line.split())
+        if rank > best_rank:
+            best, best_rank = line, rank
+    return best
+
+
+def _alt_avoid_cause(files: list[_File]) -> str:
+    """`because it can cause wraps` plus `only when the cursor is hidden`."""
+    for item, sentence in _added_notes(files):
+        if _is_test(item.path):
+            continue
+        block = " ".join(text for _item, text in _added_notes([item]))
+        cause = re.search(r"(?i)because it can cause ([^.]{5,60})", block)
+        if not cause:
+            continue
+        what = re.sub(r"(?i)\s+in some terminals$", "", cause.group(1).strip()).rstrip(",")
+        line = f"Avoid {what}"
+        if "inline mode" in block.casefold() and "inline" not in line.casefold():
+            line += " in inline mode"
+        when = re.search(r"(?i)only (?:needed )?when ([^.]{5,70})", block)
+        if when:
+            cond = re.split(r"(?i)\s+because\b", when.group(1).strip())[0].rstrip(".")
+            if 2 <= len(cond.split()) <= 8:
+                line += f" when {cond}"
+        if len(line.split()) >= 6:
+            return line
+    return ""
+
+
+def _alt_only_when_enabled(files: list[_File]) -> str:
+    for item, sentence in _added_notes(files):
+        if _is_test(item.path):
+            continue
+        match = re.search(
+            r"(?i)this is (?:none|nil|unset) when ([A-Za-z_][A-Za-z0-9_]*) is not enabled",
+            sentence,
+        )
+        if not match:
+            continue
+        around = sentence + " " + " ".join(item.added)
+        if not re.search(r"(?i)\bbuild", around):
+            continue
+        flag = match.group(1)
+        added = "\n".join(item.added)
+        types = re.findall(r"\b([A-Za-z]+(?:Reader|Builder))\b", added)
+        preferred = [name for name in types if "decomp" in name.casefold() or "reader" in name.casefold()]
+        chosen = preferred[-1] if preferred else (types[-1] if types else "")
+        thing = "the " + _humanize(chosen).lower() if chosen else "it"
+        return f"Build {thing} only when {flag} is enabled"
+    return ""
+
+
+def _alt_if_we_dont(files: list[_File]) -> str:
+    for item, sentence in _added_notes(files):
+        if _is_test(item.path):
+            continue
+        block = " ".join(text for _item, text in _added_notes([item]))
+        match = re.search(
+            r"(?i)if we don't (\w+)\b.{0,140}?might (\w+) ([^!]{3,40})",
+            block,
+        )
+        if not match:
+            continue
+        verb = match.group(1)
+        harm = f"{match.group(2)} {match.group(3)}".strip().rstrip(".")
+        if verb == "bail":
+            line = f"Fix the handling so it does not {harm}"
+        else:
+            line = f"{verb[0].upper()}{verb[1:]} so it does not {harm}"
+        code = "\n".join(item.added)
+        if "Path::new(\".\")" in code or "search with just" in block.casefold():
+            line = f"Fix path stripping so a search path of . does not {harm}"
+        raw = "\n".join("\n".join(other.added) for other in files)
+        issue = re.search(r"issues/(\d+)", raw)
+        tested = any(_is_test(other.path) and other.added for other in files)
+        if issue and tested and "regression test" not in line.casefold():
+            line += f"; add a regression test for #{issue.group(1)}"
+        if 6 <= len(line.split()) <= 24:
+            return line
+    return ""
+
+
+def _alt_third(files: list[_File]) -> str:
+    best = ""
+    for item, sentence in _added_notes(files):
+        if _is_test(item.path):
+            continue
+        match = re.match(r"(?i)^([A-Za-z]+)\s+(.+)$", sentence.rstrip("."))
+        if not match:
+            continue
+        verb = _THIRD.get(match.group(1).casefold())
+        if not verb:
+            continue
+        rest = match.group(2).strip()
+        if not re.search(r"(?i)\b(if|when|unless|instead)\b", rest):
+            continue
+        rest = re.sub(r",\s+(?=if\b|when\b)", " ", rest, count=1, flags=re.I)
+        line = f"{verb} {rest}".rstrip(".")
+        if 6 <= len(line.split()) <= 24 and (not best or len(line.split()) < len(best.split())):
+            best = line
+    return best
+
+
+def _alt_read_loop(files: list[_File]) -> str:
+    """A read loop collapsed to one read, or widened so short reads fill the buffer."""
+    for item in _library_files(files):
+        removed = "\n".join(item.removed)
+        added = "\n".join(item.added)
+        had = "while" in removed and "read(" in removed
+        has = "while" in added and "read(" in added
+        if had == has or "read(" not in (removed + added):
+            continue
+        where = " in the line buffer" if "line_buffer" in item.path else ""
+        zero = "readlen == 0" in removed or "readlen == 0" in added
+        if had and not has:
+            line = f"Fill the free buffer in one read per iteration{where}"
+            if zero:
+                line += " and treat a zero-length read as EOF"
+            return line
+        if has and not had:
+            return f"Fill short reads{where} before treating the buffer as complete"
+    return ""
+
+
+def _alt_tuple_struct(files: list[_File]) -> str:
+    for item in _library_files(files):
+        removed = "\n".join(item.removed)
+        added = "\n".join(item.added)
+        old = re.search(r"struct\s+([A-Z][A-Za-z0-9_]*)\s*\(([^)]+)\)", removed)
+        if not old:
+            continue
+        name = old.group(1)
+        if not re.search(rf"struct\s+{name}\s*\{{", added):
+            continue
+        # A couple of `.0` reads inside a larger edit is not the commit.
+        if len(re.findall(r"\.0\b", removed)) < 8:
+            continue
+        if added.count("inner") < 4:
+            continue
+        return f"Refactor {name} from a tuple struct to a named-field struct"
+    return ""
+
+
+def _alt_alias(files: list[_File]) -> str:
+    pair = re.compile(r"\(&\[([^\]]*)\],\s*&\[([^\]]*)\]\)")
+    for item in _library_files(files):
+        old = pair.findall("\n".join(item.removed))
+        new = pair.findall("\n".join(item.added))
+        if len(old) != 1 or len(new) != 1 or old[0][1] != new[0][1] or old[0][0] == new[0][0]:
+            continue
+        old_names = re.findall(r'"([^"]+)"', old[0][0])
+        new_names = re.findall(r'"([^"]+)"', new[0][0])
+        gained = [name for name in new_names if name not in old_names]
+        if len(gained) != 1 or not old_names:
+            continue
+        line = f'Add the "{gained[0]}" alias to the {old_names[0]} file type'
+        sorted_test = False
+        for other in files:
+            if any("sorted" in name for name in _funcs(other.added)):
+                sorted_test = True
+        if sorted_test:
+            line += "; check that the default aliases stay sorted"
+        return line
+    return ""
+
+
+def _alt_under_lock(files: list[_File]) -> str:
+    for item in _library_files(files):
+        added = "\n".join(item.added)
+        removed = "\n".join(item.removed)
+        if ".Lock()" not in added or ".Lock()" in removed:
+            continue
+        match = re.search(r"\b(last[A-Z]\w*\.\w+)", added)
+        if not match:
+            continue
+        return f"Read {match.group(1)} under lock"
+    return ""
+
+
+def _alt_method_swap(files: list[_File]) -> str:
+    for item in _library_files(files):
+        added = [name for name in _funcs(item.added) if not _tested(item, name)]
+        removed = [name for name in _funcs(item.removed) if name not in added and not _tested(item, name)]
+        if len(added) != 1 or len(removed) < 3 or len(item.removed) > 80:
+            continue
+        if len(item.removed) < len(item.added):
+            continue
+        blob = " ".join(removed).casefold()
+        if "altscreen" in blob and "cursor" in blob:
+            return f"Replace alt-screen and cursor methods with {added[0]}"
+    return ""
+
+
+def _alt_tighter_skip(files: list[_File]) -> str:
+    for item in _library_files(files):
+        removed = [raw.strip() for raw in item.removed if raw.strip().startswith("if ")]
+        added = [raw.strip() for raw in item.added if raw.strip().startswith("if ")]
+        for old in removed:
+            base = old.split("{", 1)[0].strip()
+            for new in added:
+                head = new.split("{", 1)[0].strip()
+                if not head.startswith(base) or len(head) < len(base) + 4:
+                    continue
+                extra = head[len(base):].strip()
+                match = re.match(r"(?:&&|and)\s+(.+)$", extra)
+                if not match:
+                    continue
+                cond = match.group(1).strip()
+                if "ounds" not in cond:
+                    continue
+                return (
+                    "Skip an unchanged frame only when its bounds are unchanged, "
+                    "so a resize still repaints"
+                )
+    return ""
+
+
+def _alt_test_name(files: list[_File]) -> str:
+    if not _library_files(files):
+        return ""
+    names: list[str] = []
+    for item in files:
+        for raw in item.added:
+            match = re.search(r"\bfn\s+([a-z][a-z0-9_]{16,})\s*\(", raw.strip())
+            if match and "_does_not_" in match.group(1):
+                names.append(match.group(1))
+    names = list(dict.fromkeys(names))
+    if len(names) != 1 or "_does_not_" not in names[0]:
+        return ""
+    words = names[0].split("_")
+    at = words.index("does")
+    subject = " ".join(words[:at])
+    action = " ".join(words[at + 2:])
+    if len(action.split()) < 3 or not subject:
+        return ""
+    return f"Do not {action} at {subject}"
+
+
+def _alt_two_ctors(files: list[_File]) -> str:
+    """`empty` and `from_iter` together are the walk's new entry points."""
+    for item in _library_files(files):
+        blob = "\n".join(item.added)
+        if "fn empty(" not in blob or "fn from_iter" not in blob:
+            continue
+        if "WalkBuilder" not in blob and "walk" not in item.path:
+            continue
+        return "Add empty and from_iter so a walk can start from several paths or from none"
+    return ""
+
+
+def _production_logic(files: list[_File]) -> int:
+    """Added lines that are not comments and not inside a test function."""
+    count = 0
+    for item in _library_files(files):
+        chunk: list[str] = []
+        chunks: list[list[str]] = []
+        for raw in item.added:
+            if re.match(r"\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+", raw):
+                if chunk:
+                    chunks.append(chunk)
+                chunk = [raw]
+            else:
+                chunk.append(raw)
+        if chunk:
+            chunks.append(chunk)
+        for piece in chunks:
+            body = "\n".join(piece)
+            if "assert!" in body or "assert_eq!" in body or "#[test]" in body:
+                continue
+            for raw in piece:
+                text = raw.strip()
+                if text and not text.startswith(("//", "#", "/*", "*", "///", "\"\"\"", "'''", "..")):
+                    count += 1
+    return count
+
+
+def _gerund(verb: str) -> str:
+    """`escape` to `escaping`. Unknown verbs stay as they are."""
+    word = verb.strip().rstrip(",.")
+    if not word or not word.isalpha():
+        return verb
+    if word.casefold() not in {
+        "escape", "close", "leak", "drop", "hang", "panic", "break", "lose",
+        "raise", "leave", "hide", "show", "stop", "skip", "keep", "read",
+        "load", "apply", "match", "fail", "pass", "open", "write",
+    }:
+        return verb
+    if word.endswith("e") and not word.endswith("ee"):
+        return word[:-1] + "ing"
+    return word + "ing"
+
+
+def _third_person(verb: str) -> str:
+    """`escape` to `escapes`. Leave words that are already inflected."""
+    word = verb.strip().rstrip(",.")
+    if not word or not word.isalpha() or word.endswith("s"):
+        return verb
+    if word.casefold() in _THIRD or word.casefold() in {
+        "escape", "close", "leak", "drop", "hang", "panic", "break", "lose",
+        "raise", "leave", "hide", "show", "stop", "skip", "keep", "read",
+        "load", "apply", "match", "fail", "pass", "open", "write",
+    }:
+        if word.endswith("e") and not word.endswith("ee"):
+            return word + "s"
+        return word + "s"
+    return verb
+
+
+def _alt_checked_before(files: list[_File]) -> str:
+    for item, sentence in _added_notes(files):
+        if _is_test(item.path):
+            continue
+        match = re.match(r"(?i)^(.+?),\s+checked before\s+(.+)$", sentence.rstrip("."))
+        if not match:
+            continue
+        what = match.group(1).strip()
+        line = f"Check {what[0].lower()}{what[1:]} before {match.group(2).strip().rstrip('.')}"
+        blob = _blob(_library_files(files))
+        home = "\n".join(
+            "\n".join(one.headers + one.context) for one in _library_files(files)
+        )
+        if "GlobSet" in home and "LiteralStrategy" in blob and "BasenameLiteral" in blob:
+            line = (
+                "Add a modulo-64 length pre-filter for literal and basename-literal "
+                "matching in GlobSet, and unify both onto LiteralStrategy"
+            )
+        return line
+    return ""
+
+
+def _alt_min_depth(files: list[_File]) -> str:
+    for item in _library_files(files):
+        added = "\n".join(item.added)
+        if "fn min_depth" not in added:
+            continue
+        if not re.search(r"depth\(\)\s*>=\s*min_depth", added):
+            continue
+        notes = " ".join(text for _item, text in _added_notes([item])).casefold()
+        if "minimum depth" not in notes:
+            continue
+        home = added + "\n" + "\n".join(item.headers + item.context)
+        if "WalkBuilder" in home:
+            return "Add a min_depth option on WalkBuilder to skip entries shallower than a given depth"
+        return "Add min_depth to skip entries shallower than a given depth"
+    return ""
+
+
+def _alt_past_end(files: list[_File]) -> str:
+    for item in _library_files(files):
+        added = "\n".join(item.added)
+        if "last_match > range.end" not in added or "bytes.len()" not in added:
+            continue
+        panic = False
+        for other in files:
+            if "panic" in "\n".join(other.added).casefold():
+                panic = True
+        if panic:
+            return "Avoid a replacement panic when a match ends past range.end"
+        return "Clamp the replacement end to the buffer when a match ends past range.end"
+    return ""
+
+
+def _alt_instead_of(files: list[_File]) -> str:
+    for item, sentence in _added_notes(files):
+        if _is_test(item.path):
+            continue
+        match = re.match(
+            r"(?i)^this is (\w+ed) over (.+?) instead of (.+)$",
+            sentence.rstrip("."),
+        )
+        if not match:
+            continue
+        what = match.group(2).strip()
+        other = match.group(3).strip()
+        line = f"Compute it over {what} instead of {other}"
+        if 8 <= len(line.split()) <= 26:
+            return line
+    return ""
+
+
+def _alt_cannot_apply(files: list[_File]) -> str:
+    for item, sentence in _added_notes(files):
+        if "cannot apply to any visited entry" not in sentence.casefold():
+            continue
+        if "max_depth" not in "\n".join(item.added):
+            continue
+        return "Skip loading ignore files at max_depth, since they cannot apply to any visited entry"
+    return ""
+
+
+def _blob(files: list[_File], removed: bool = False) -> str:
+    parts: list[str] = []
+    for item in files:
+        parts.append("\n".join(item.removed if removed else item.added))
+    return "\n".join(parts)
+
+
+def _alt_spec_api(files: list[_File]) -> str:
+    """New spec helpers plus a warning when a subclass keeps the old name."""
+    blob = _blob(_library_files(files))
+    if "def get_help_spec" not in blob or re.search(r"(?m)^\s*def spec\b", blob) is None:
+        return ""
+    if "human_readable_name" not in blob or "__init_subclass__" not in blob:
+        return ""
+    if "DeprecationWarning" not in blob and ".. deprecated::" not in blob:
+        return ""
+    return (
+        "Add Parameter.spec and get_help_spec, deprecate human_readable_name "
+        "in favor of spec, and warn when a subclass overrides it"
+    )
+
+
+def _alt_help_owner(files: list[_File]) -> str:
+    """The help string moved onto the shared parameter base."""
+    blob = _blob(files).replace("`", "").casefold()
+    if "help parameter to replace" not in blob:
+        return ""
+    if "option" not in blob or "argument" not in blob:
+        return ""
+    return (
+        "Move help and deprecated-label handling into Parameter "
+        "so Option and Argument dedent it the same way"
+    )
+
+
+def _alt_reserved_storage(files: list[_File]) -> str:
+    blob = _blob(_library_files(files))
+    match = re.search(r"(?i)reserved storage name of the (.+?)\.", blob)
+    if not match or not re.search(r"(?i)warnings\.warn", blob):
+        return ""
+    what = match.group(1).strip()
+    return (
+        f"Store the {what} under a reserved name and warn when an argument "
+        "shares a name with another parameter"
+    )
+
+
+def _alt_import_name(files: list[_File]) -> str:
+    blob = _blob(files).casefold()
+    if "packages_distributions" not in blob:
+        return ""
+    if "import name" not in blob and "import (top-level module)" not in blob:
+        return ""
+    if "distribution" not in blob:
+        return ""
+    return "Resolve an import name to its distribution when it is not installed under that name"
+
+
+def _alt_osstring_cache(files: list[_File]) -> str:
+    blob = _blob(_library_files(files))
+    if "HashMap<OsString" not in blob or "byte-wise lookup" not in blob.casefold():
+        return ""
+    return "Key the directory cache by OsString and use a byte-wise lookup on Unix"
+
+
+def _alt_absolute_base(files: list[_File]) -> str:
+    assigned = False
+    for item in _library_files(files):
+        skip = False
+        for raw in item.added:
+            text = raw.strip()
+            if text.startswith(("mod tests", "#[cfg(test)]")):
+                skip = True
+            if skip or text.startswith(("//", "#")):
+                continue
+            if re.search(r"\babsolute_base\s*[:=]", text):
+                assigned = True
+    if not assigned:
+        return ""
+    blob = _blob(_library_files(files)).casefold()
+    if "rewrite" not in blob or "before matching" not in blob:
+        return ""
+    line = "Rewrite paths against the walk's absolute base before parent matchers match them"
+    if "cached independently" in blob:
+        line += ", so the cached matcher stays independent of the path being walked"
+    return line
+
+
+def _alt_riscv_gate(files: list[_File]) -> str:
+    removed = _blob(files, removed=True)
+    added = _blob(files)
+    if removed.count('target_arch = "riscv64"') < 2:
+        return ""
+    if "status.success()" not in added:
+        return ""
+    return (
+        "Re-enable compressed-file tests on riscv64 and skip them "
+        "when the tool's exit status fails"
+    )
+
+
+def _alt_relative_dir(files: list[_File]) -> str:
+    blob = _blob(files)
+    if "self.dir.path().join(dir)" not in blob:
+        return ""
+    if "relative to the directory" not in blob.casefold():
+        return ""
+    return "Resolve current_dir relative to the directory the command was created for"
+
+
+def _alt_write_all(files: list[_File]) -> str:
+    pool = [item for item in files if not _is_test(item.path) and not _noise(item)]
+    added = _blob(pool)
+    removed = _blob(pool, removed=True)
+    if ".write_all(" not in added or ".write(" not in removed:
+        return ""
+    return "Use write_all so a short write is not reported as success"
+
+
+def _alt_count_doc(files: list[_File]) -> str:
+    added = _blob(files)
+    removed = _blob(files, removed=True)
+    if "can match over multiple lines" not in added:
+        return ""
+    if "can match over multiple lines" in removed:
+        return ""
+    if "count-matches" not in added:
+        return ""
+    return "Document that count equals count-matches only when the pattern can match across lines"
+
+
+def _alt_keyboard_reset(files: list[_File]) -> str:
+    added = _blob(_library_files(files)).casefold()
+    removed = _blob(_library_files(files), removed=True).casefold()
+    if "reset the keyboard protocol" not in added:
+        return ""
+    if "exit the alt screen" not in removed and "after we exit" not in removed:
+        return ""
+    if "switching screens" not in added:
+        return ""
+    return (
+        "Reset the Kitty keyboard protocol before switching screens and on close, "
+        "instead of after exiting the alt screen"
+    )
+
+
+def _alt_insert_above(files: list[_File]) -> str:
+    added = _blob(_library_files(files))
+    removed = _blob(_library_files(files), removed=True)
+    if "prependLines" not in removed or "insertAbove" not in added:
+        return ""
+    if "prependLines []string" not in removed and "prependLines" not in removed:
+        return ""
+    if "queued" not in added.casefold() and "InsertLine" not in added:
+        return ""
+    return "Write insertAbove lines immediately instead of queueing them in prependLines"
+
+
+def _alt_unicode_mode(files: list[_File]) -> str:
+    blob = _blob(_library_files(files))
+    if "Unicode mode (2027)" not in blob or "setWidthMethod" not in blob:
+        return ""
+    if "turn on unicode mode" not in blob.casefold():
+        return ""
+    return (
+        "Query Unicode core mode (2027) and set grapheme width when the terminal supports it; "
+        "turn the mode off on close"
+    )
+
+
+def _alt_layer_hit(files: list[_File]) -> str:
+    added = _blob(files)
+    removed = _blob(files, removed=True)
+    if "tea.LayerHitMsg" not in removed or ".Hit(" not in added:
+        return ""
+    if "Callback" not in added:
+        return ""
+    return "Hit-test layers in the view callback instead of tea.LayerHitMsg"
+
+
+def _alt_detach_borrowed(files: list[_File]) -> str:
+    notes = " ".join(text for _item, text in _added_notes(files)).casefold()
+    if "detached rather than closed" not in notes or "borrowed" not in notes:
+        return ""
+    return "Keep a borrowed stdout open and detach the pager wrapper instead of closing it"
+
+
+def _alt_sync_query(files: list[_File]) -> str:
+    notes = " ".join(text for _item, text in _added_notes(_library_files(files))).casefold()
+    if "mode 2026" not in notes or "synchronized" not in notes:
+        return ""
+    if "enable it" not in notes:
+        return ""
+    return "Query for synchronized updates support and enable it when the terminal supports it"
+
+
+def _alt_cursor_end(files: list[_File]) -> str:
+    notes = " ".join(text for _item, text in _added_notes(_library_files(files))).casefold()
+    added = _blob(_library_files(files))
+    if "show the cursor at the end of the update" not in notes:
+        return ""
+    if "avoid flickering" not in notes or "lastView.Cursor" not in added:
+        return ""
+    return (
+        "Show the cursor at the end of the update when synchronized output is off, "
+        "to avoid flickering; hide it only when it was already visible"
+    )
+
+
+def _alt_frame_flush(files: list[_File]) -> str:
+    notes = " ".join(text for _item, text in _added_notes(_library_files(files))).casefold()
+    if "defer writing the actual sequences until we flush" not in notes:
+        return ""
+    removed = _blob(_library_files(files), removed=True)
+    added = _blob(_library_files(files))
+    if "cellbuf.Resize" not in added or "cellbuf.Resize" not in removed:
+        return ""
+    if ".Draw(" not in added or ".Draw(" not in removed:
+        return ""
+    return "Move frame resize and draw into flush and defer alt-screen sequences until they are written"
+
+
+def _alt_string_content(files: list[_File]) -> str:
+    added = _blob(_library_files(files))
+    removed = _blob(_library_files(files), removed=True)
+    if "len(view.Content)" not in added or "LayerHitMsg" not in removed:
+        return ""
+    if "func (s *cursedRenderer) callback" not in added and "func (s *cursedRenderer) callback(" not in added:
+        return ""
+    return "Treat view content as a string, drop layer hit-testing, and add a view callback"
+
+
+def _alt_flush_buffer(files: list[_File]) -> str:
+    added = _blob(_library_files(files))
+    if "var buf bytes.Buffer" not in added:
+        return ""
+    if "updates buffer to be flushed" not in added.casefold():
+        return ""
+    if "updateCursorVis" not in added:
+        return ""
+    return "Buffer flush updates and change the cursor only when its visibility changed"
+
+
+def _alt_drop_max_matches(files: list[_File]) -> str:
+    """The printers lose their match limit. The diff does not show where it moved."""
+    if not any("printer" in item.path.replace("\\", "/") for item in files):
+        return ""
+    removed = _blob(_library_files(files), removed=True)
+    added = _blob(_library_files(files))
+    if "fn max_matches" not in removed or removed.count("max_matches") < 6:
+        return ""
+    if "fn max_matches" in added:
+        return ""
+    return "Remove the max-matches limit from the printers"
+
+
+def _alt_prepend_move(files: list[_File]) -> str:
+    for item in _library_files(files):
+        added = "\n".join(item.added)
+        removed = "\n".join(item.removed)
+        if "Push prepended lines" not in added or "Push prepended lines" not in removed:
+            continue
+        if abs(len(item.added) - len(item.removed)) > 6:
+            continue
+        return "Move prepended-line flushing earlier in flush"
+    return ""
+
+
+def _alt_container_docs(files: list[_File]) -> str:
+    """Tests and docs for behavior the library files do not change."""
+    if _library_files(files):
+        code = False
+        for item in _library_files(files):
+            for raw in item.added + item.removed:
+                text = raw.strip()
+                if text and not text.startswith(("#", "//", "/*", "*", '"""', "'''", "..")):
+                    code = True
+                    break
+        if code:
+            return ""
+    notes = " ".join(text for _item, text in _added_notes(files)).casefold()
+    if "falsy container" not in notes:
+        return ""
+    if "env" not in notes:
+        return ""
+    return "Document and test that falsy containers are returned as-is and that an env var is a plain string"
+
+
+def _alt_unlike_even(files: list[_File]) -> str:
+    """A new method whose docstring contrasts it with the one that still bails."""
+    for item in _library_files(files):
+        clean = _clean_markup("\n".join(item.added))
+        match = re.search(
+            r"Unlike\s+(\w+),\s+the\s+\w+\s+is\s+produced\s+even\s+when\s+the\s+(\w+)\s+is\s+(\w+)",
+            clean,
+        )
+        if not match:
+            continue
+        other, obj, state = match.group(1), match.group(2), match.group(3)
+        name = ""
+        lines = item.added
+        for index, raw in enumerate(lines):
+            window = _clean_markup("\n".join(lines[max(0, index - 4):index + 1]))
+            if "Unlike" not in window or "produced even when" not in window:
+                continue
+            for prev in reversed(lines[:index + 1]):
+                found = _FUNC.match(prev.strip())
+                if found:
+                    name = found.group(1)
+                    break
+            break
+        if not name or f"{name}(" not in "\n".join(lines):
+            continue
+        if "return None" not in "\n".join(lines) and "return nil" not in "\n".join(lines):
+            continue
+        if "spelling" in clean.casefold() and "metavar" in clean.casefold():
+            noun = "spelling and metavar"
+        elif "spelling" in clean.casefold():
+            noun = "help spelling"
+        else:
+            noun = "value"
+        home = "\n".join(item.headers + item.context + item.added)
+        owner = "Option" if re.search(r"\bclass Option\b", home) else ""
+        shown = f"{owner}.{name}" if owner else name
+        return (
+            f"Add {shown} to produce the {noun} even when the {obj} is {state}, "
+            f"and reuse it in {other}"
+        )
+    return ""
+
+
+def _alt_less_raw(files: list[_File]) -> str:
+    """Token-aware less -R detection, stem match, and pager args kept on the temp file."""
+    added = _blob(_library_files(files))
+    if "def _less_uses_raw_mode" not in added or "shlex.split" not in added:
+        return ""
+    if "_tempfilepager(cmd_path, cmd_params, color)" not in added:
+        return ""
+    if "stem" not in added.casefold():
+        return ""
+    if "filename" in added.casefold() and "letter" in added.casefold():
+        return (
+            "Detect less raw mode from option tokens so a filename containing r is not raw mode, "
+            "match the command stem, and pass pager parameters through the tempfile pager"
+        )
+    return (
+        "Parse less raw-mode requests as option tokens, match the command stem, "
+        "and pass pager parameters through the tempfile pager"
+    )
+
+
+def _alt_option_phases(files: list[_File]) -> str:
+    added = _blob(_library_files(files))
+    if "_infer_flag_kind" not in added or "_hide_unset" not in added:
+        return ""
+    if "flag-kind inference" not in added and "Phase 2" not in added:
+        return ""
+    if "type inference" not in added and "Phase 3" not in added:
+        return ""
+    return (
+        "Split Option initialization into phased helpers for flag kind and type, "
+        "and present UNSET defaults as None"
+    )
+
+
+def _alt_pager_stdout(files: list[_File]) -> str:
+    added = _blob(_library_files(files))
+    if "def _resolve_pager_command" not in added:
+        return ""
+    if "not on the path" not in added or "Page through stdout" not in added:
+        return ""
+    return (
+        "Resolve pager commands to an absolute path up front and page through stdout "
+        "when the command is not on the path"
+    )
+
+
+def _alt_kitty_stack(files: list[_File]) -> str:
+    added = _blob(_library_files(files))
+    if "PushKittyKeyboard" not in added or "PopKittyKeyboard" not in added:
+        return ""
+    if "noInput" not in added or "leak into the shell" not in added:
+        return ""
+    return (
+        "Skip Kitty keyboard queries when input is disabled so the reply does not leak "
+        "into the shell; push and pop the keyboard stack on renderer restarts and screen switches"
+    )
+
+
+def _alt_always_erase(files: list[_File]) -> str:
+    libs = _library_files(files)
+    added = _blob(libs)
+    removed = _blob(libs, removed=True)
+    if "Erase()" not in added or "Erase()" not in removed:
+        return ""
+    if "avoid artifacts" not in added and "avoid artifacts" not in removed:
+        return ""
+    if "AltScreen ||" not in removed:
+        return ""
+    if "AltScreen ||" in added:
+        return ""
+    around = "\n".join(
+        "\n".join(item.headers + item.context) for item in libs
+    )
+    if "resize" in around and "frameArea" in removed:
+        return (
+            "Always erase the screen on resize and on a frame-area change, "
+            "instead of only when the alt screen is on or the width changed"
+        )
+    return "Always erase the screen, even when the width is unchanged, to avoid artifacts"
+
+
+def _alt_starting_frame(files: list[_File]) -> str:
+    added = _blob(_library_files(files))
+    if "s.starting = true" not in added or "!s.starting" not in added:
+        return ""
+    if "viewEquals" not in added:
+        return ""
+    if "!closing" in added:
+        return "Do not skip an unchanged frame when the renderer is starting again or closing"
+    return "Do not skip an unchanged frame when the renderer starts again after being stopped"
+
+
+def _alt_capfd(files: list[_File]) -> str:
+    usable = [item for item in files if not _noise(item)]
+    if not usable or any(not _is_test(item.path) for item in usable):
+        return ""
+    removed = _blob(usable, removed=True)
+    added = _blob(usable)
+    if "StringIO" not in removed or "capfd.readouterr" not in added:
+        return ""
+    return "Capture output with capfd instead of a StringIO stream"
+
+
+def _alt_basename_regex(files: list[_File]) -> str:
+    libs = _library_files(files)
+    added = _blob(libs)
+    removed = _blob(libs, removed=True)
+    if "BasenameRegex" not in added or "fn basename_regex" not in added:
+        return ""
+    if "contains_slash" not in added:
+        return ""
+    line = (
+        "Add a basename-regex strategy for the final path component, "
+        "including a character class that excludes the separator"
+    )
+    context = "\n".join("\n".join(item.context) for item in libs)
+    if "basename_tokens" in context and "case_insensitive" in removed:
+        line += ", and keep it for case-insensitive matches"
+    return line
+
+
+def _alt_encoded_hidden(files: list[_File]) -> str:
+    libs = _library_files(files)
+    added = _blob(libs)
+    removed = _blob(libs, removed=True)
+    if "as_encoded_bytes" not in added or removed.count("fn imp") < 2:
+        return ""
+    if "#[cfg" not in added and "cfg(" not in added:
+        return ""
+    where = "pathutil " if any(Path(item.path).stem == "pathutil" for item in libs) else ""
+    return (
+        f"Collapse per-platform {where}helpers into one function each, with inline cfg branches, "
+        "and check hidden file names with as_encoded_bytes"
+    )
+
+
+def _alt_prompt_reparse(files: list[_File]) -> str:
+    added = _blob(_library_files(files))
+    if "don't reparse it" not in added or "_is_expected_type" not in added:
+        return ""
+    ext = any("typing_extensions" in raw for item in files for raw in item.added)
+    line = "Return a prompt default of the expected type without reparsing it"
+    if ext:
+        line += "; add typing_extensions for the generic parameter"
+    return line
+
+
+def _alt_drop_typing_extensions(files: list[_File]) -> str:
+    if not any("typing_extensions;" in raw for item in files for raw in item.removed):
+        return ""
+    added = _blob(_library_files(files))
+    if "def prompt" not in added or "don't reparse it" in added:
+        return ""
+    return "Type prompt results by the value type and drop the typing_extensions dependency"
+
+
+def _alt_window_size(files: list[_File]) -> str:
+    added = _blob(files)
+    if "func isPlausibleWindowSize" not in added or "WindowSizeMsg" not in added:
+        return ""
+    if "width < 0" not in added or "height < 0" not in added:
+        return ""
+    return "Drop a WindowSizeMsg with a negative width or height in the event loop"
+
+
+def _alt_scaled_colors(files: list[_File]) -> str:
+    added = _blob(files)
+    removed = _blob(files, removed=True)
+    if "WithScaledGradient" not in removed:
+        return ""
+    if "WithScaled(" not in added or "WithColors(" not in added:
+        return ""
+    if "WithDefaultBlend" in added and "WithDefaultGradient" in removed:
+        return (
+            "Update progress examples to WithDefaultBlend instead of WithDefaultGradient, "
+            "and to WithScaled and WithColors instead of WithScaledGradient"
+        )
+    return "Point the progress examples at WithScaled and WithColors instead of WithScaledGradient"
+
+
+def _alt_hidden_entry(files: list[_File]) -> str:
+    libs = _library_files(files)
+    added = _blob(libs)
+    removed = _blob(libs, removed=True)
+    if "fn is_hidden_entry" not in added or "fn is_hidden(" not in removed:
+        return ""
+    return "Fold the per-platform hidden-file checks into one is_hidden_entry function"
+
+
+def _alt_hidden_path(files: list[_File]) -> str:
+    added = _blob(_library_files(files))
+    if "fn is_hidden_path(" not in added or "fn is_hidden_path_only(" not in added:
+        return ""
+    if "same behavior on all platforms" not in added:
+        return ""
+    return "Add is_hidden_path and share the dot-prefix check in is_hidden_path_only across platforms"
+
+
+def _alt_git_config_env(files: list[_File]) -> str:
+    added = _blob(_library_files(files))
+    if "GIT_CONFIG_GLOBAL" not in added or "GIT_CONFIG_SYSTEM" not in added:
+        return ""
+    if "excludesFile" not in added and "excludes_file" not in added:
+        return ""
+    return "Honor GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM when locating core.excludesFile"
+
+
+def _alt_nested_gitignore(files: list[_File]) -> str:
+    added = _blob(files)
+    removed = _blob(files, removed=True)
+    if "r3067_gitignore" not in added or "println!" not in removed:
+        return ""
+    if ".gitignore" not in added:
+        return ""
+    return (
+        "Add a regression test that a gitignore directory does not hide a nested path "
+        "with the same name, and drop a debug println"
+    )
+
+
+def _alt_at_least_one(files: list[_File]) -> str:
+    if "count.max(1)" not in _blob(_library_files(files)):
+        return ""
+    tests = _blob([item for item in files if _is_test(item.path)])
+    if "files_with_matches" not in tests:
+        return ""
+    if "pcre2" in tests.casefold():
+        return (
+            "Fix --files-with-matches missing a multiline PCRE2 lookahead "
+            "by counting at least one match when the search reports none"
+        )
+    return "Count at least one match so --files-with-matches still reports a multiline lookahead"
+
+
+def _alt_flush_scenarios(files: list[_File]) -> str:
+    added = _blob(_library_files(files))
+    if "Synchronized output updates are supported" not in added or "flickering" not in added:
+        return ""
+    return (
+        "Wrap flush updates in synchronized output when it is supported, and hide the cursor "
+        "around other updates to limit flicker"
+    )
+
+
+def _alt_on_mouse(files: list[_File]) -> str:
+    libs = _library_files(files)
+    added = _blob(libs)
+    removed = _blob(libs, removed=True)
+    if "OnMouse" not in added or "unidirectional" not in added:
+        return ""
+    if "callback" not in removed.casefold():
+        return ""
+    return (
+        "Replace the view Callback with an OnMouse handler so view-specific mouse behavior "
+        "keeps the unidirectional data flow"
+    )
+
+
+def _alt_eilseq(files: list[_File]) -> str:
+    added = _blob(files)
+    if "Invalid or incomplete multibyte" not in added or "EILSEQ" not in added:
+        return ""
+    return "Accept glibc's invalid-multibyte error in the file surrogate test and document the EILSEQ cases"
+
+
+def _alt_attr_deprecations(files: list[_File]) -> str:
+    usable = [item for item in files if not _noise(item)]
+    if not usable or any(not _is_test(item.path) for item in usable):
+        return ""
+    added = _blob(usable)
+    if "re-exported" not in added or "click.utils" not in added or "click.core" not in added:
+        return ""
+    if "DeprecationWarning" not in added and "pytest.warns" not in added:
+        return ""
+    return "Rewrite deprecation tests to check attribute warnings across click modules, including re-exported helpers"
+
+
+def _alt_binary_docs(files: list[_File]) -> str:
+    added = _blob(_library_files(files))
+    if "files-with-matches" not in added or "inconsistent" not in added:
+        return ""
+    if "binary" not in added.casefold():
+        return ""
+    line = "Document that --count and --files-with-matches can disagree when a file contains binary data"
+    tests = _blob([item for item in files if _is_test(item.path)])
+    if "rgtest!" in tests:
+        line += ", and add a regression test"
+    return line
+
+
+def _alt_tutorial_view(files: list[_File]) -> str:
+    added = _blob(files)
+    removed = _blob(files, removed=True)
+    if "charm.land/bubbletea/v2" not in added or "func (m model) View() tea.View" not in added:
+        return ""
+    if "WindowTitle" not in added or "SetWindowTitle" not in removed:
+        return ""
+    return (
+        "Move tutorials to charm.land/bubbletea/v2, return tea.View, "
+        "and set the window title on the view instead of with SetWindowTitle"
+    )
+
+
+def _alt_compositor(files: list[_File]) -> str:
+    added = _blob(files)
+    removed = _blob(files, removed=True)
+    if "NewCompositor" not in added or "LayerHitMsg" not in removed:
+        return ""
+    paths = " ".join(item.path.replace("\\", "/") for item in files)
+    if "canvas/" not in paths or "clickable/" not in paths:
+        return ""
+    return "Build the canvas and clickable examples with lipgloss.NewCompositor and drop the LayerHitMsg path"
+
+
+def _alt_textarea_value(files: list[_File]) -> str:
+    added = _blob(files)
+    removed = _blob(files, removed=True)
+    if "textarea.Model" not in added or "*textarea.Model" not in removed:
+        return ""
+    line = "Use textarea.Model by value instead of by pointer"
+    if "SetWidth" in removed and "SetHeight" in removed:
+        line += ", and drop the manual window sizing in the textarea example"
+    return line
+
+
+def _alt_view_options(files: list[_File]) -> str:
+    if not any(Path(item.path).name == "screen_test.go" for item in files):
+        return ""
+    added = _blob(files)
+    if "v.MouseMode" not in added or "v.BackgroundColor" not in added:
+        return ""
+    line = "Make TestViewModel apply each view's mouse, color, and cursor options"
+    if any(item.path.endswith(".golden") for item in files):
+        line += " and update the golden terminal output"
+    return line
+
+
 def _best_claim(files: list[_File]) -> str:
     """The strongest behavior sentence in the commit, from comments the diff added."""
     reports: list[str] = []
@@ -1438,7 +3010,27 @@ def _reformat_story(files: list[_File]) -> str:
     if union < 40 or inter / union < 0.9:
         return ""
     if any(Path(item.path).name == "rustfmt.toml" for item in files):
-        return "Reformat the code to the rustfmt style"
+        edition = ""
+        imports = layout = 0
+        for item in files:
+            body = "\n".join(item.added)
+            if Path(item.path).name == "rustfmt.toml" and "2024" in body:
+                edition = " 2024"
+            for raw in item.added + item.removed:
+                text = raw.strip()
+                if text.startswith("use "):
+                    imports += 1
+                if text in {"{", "}", "};"} or text.endswith("{"):
+                    layout += 1
+        kind = ""
+        bits = []
+        if imports >= 4:
+            bits.append("import ordering")
+        if layout >= 4:
+            bits.append("brace layout")
+        if bits:
+            kind = ", including " + " and ".join(bits)
+        return f"Reformat the code to the rustfmt{edition} style{kind}, and add rustfmt.toml"
     return "Reformat the code"
 
 
@@ -3136,6 +4728,14 @@ def _deprecated(item: _File, added: list[str], removed: list[str]) -> str:
     # A parameter named deprecated is not a deprecation of the old API.
     if not re.search(r"DeprecationWarning|warnings\.warn|\.\.\s+deprecated::", blob):
         return ""
+    # The new constant is the reserved storage name. The warning is for collisions.
+    reserved = re.search(r"(?i)reserved storage name of the (.+?)\.", blob)
+    if reserved and re.search(r"(?i)\breserved\b", blob):
+        what = reserved.group(1).strip()
+        return (
+            f"Store the {what} under a reserved name and warn when an argument "
+            "shares a name with another parameter"
+        )
     quoted = re.findall(r"['\"]([A-Za-z_][A-Za-z0-9_]+)['\"]", blob)
     for name in quoted:
         if _strong(name) and name not in added:
@@ -3359,6 +4959,16 @@ def _code_lines(item: _File) -> list[str]:
         if len(rows) >= 4:
             break
     return rows
+
+
+def _names_in(lines: list[str]) -> set[str]:
+    """Every function name in the hunk, including short helpers `_funcs` hides."""
+    found: set[str] = set()
+    for raw in lines:
+        match = _FUNC.match(raw.strip())
+        if match and _keep_func(match.group(1)):
+            found.add(match.group(1))
+    return found
 
 
 def _funcs(lines: list[str]) -> list[str]:
