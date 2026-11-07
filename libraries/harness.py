@@ -117,6 +117,7 @@ def subject(stat: str, patch: str) -> str:
 def _shipped(files: list[_File], stat: str) -> str:
     """The line a commit uses. Tests and the fact card must share it."""
     line = _qualify_method(_qualify_rename(_promote(_compose(files, stat), files), files), files)
+    line = _drop_code_tail(line)
     moved = _test_package_merge(stat)
     if moved and (_weak_line(line) or line.casefold().startswith("add tests")):
         line = moved
@@ -170,6 +171,23 @@ def _test_tail(line: str, files: list[_File]) -> str:
     if extra in line.casefold() or len(line) + len(extra) > 200:
         return line
     return f"{line}; {extra}"
+
+
+def _drop_code_tail(line: str) -> str:
+    """A leaked code statement is not a second change."""
+    text = re.sub(r"(?:\s*\|){2,}.*$", "", line or "").strip()
+    if "; " not in text:
+        return text
+    head, *rest = text.split("; ")
+    kept = [head]
+    for part in rest:
+        letters = sum(ch.isalpha() for ch in part)
+        if "|" in part or letters < 8:
+            continue
+        if re.search(r"\w+\.\w+\(", part) and len(part.split()) < 5:
+            continue
+        kept.append(part)
+    return "; ".join(kept)
 
 
 def _glance(text: str) -> str:
@@ -529,7 +547,13 @@ def _edit_fact(files: list[_File]) -> str:
         or _doc_verb(files)
         or _new_func_doc(files)
         or _deprecated_added(files)
+        or _or_extension(files)
+        or _call_moved_into_pcall(files)
+        or _interrupted_ctrl_c(files)
+        or _stricter_when_off(files)
+        or _branched_literal(files)
         or _plain_reason(files)
+        or _inventory_behavior(files)
     )
 
 
@@ -794,6 +818,10 @@ def _always_call(files: list[_File]) -> str:
             if why and len(why.split()) > 8:
                 why = ""
         verb = _humanize(calls[0]).lower()
+        # `.Dir()` is a noun. "Always dir" is not the change.
+        word = verb.split()[0]
+        if len(word) <= 3 or word in {"dir", "file", "err", "nil", "buf", "data", "ref", "key", "val", "ctx"}:
+            continue
         line = f"Always {verb}"
         if why:
             line += " to " + why
@@ -1351,6 +1379,18 @@ def _because_note(files: list[_File]) -> str:
     return hit
 
 
+def _almost_copied(clean: str, removed: list[str]) -> bool:
+    """A long note that only gained a few characters is the same fact."""
+    if len(clean) < 48:
+        return False
+    for old in removed:
+        if len(old) < 48:
+            continue
+        if SequenceMatcher(None, clean, old).ratio() >= 0.9:
+            return True
+    return False
+
+
 def _note_moved(sentence: str, removed: list[str]) -> bool:
     """A comment that moved with a wording tweak is not a new fact."""
     clean = _clean_markup(sentence).casefold().strip()
@@ -1478,6 +1518,8 @@ _DOC_VERB = {
     "avoids": "Avoid", "restores": "Restore", "flushes": "Flush", "skips": "Skip",
     "rejects": "Reject", "drops": "Drop", "keeps": "Keep", "closes": "Close",
     "waits": "Wait", "publishes": "Publish", "forwards": "Forward",
+    "starts": "Start", "fetches": "Fetch", "verifies": "Verify",
+    "installs": "Install", "copies": "Copy",
 }
 
 
@@ -1526,6 +1568,7 @@ def _doc_verb(files: list[_File]) -> str:
 
 def _new_func_doc(files: list[_File]) -> str:
     """The lead doc on a new function, when it says what the function does."""
+    leads: list[str] = []
     for item in files:
         if _is_test(item.path) or _noise(item) or _is_doc_path(item.path):
             continue
@@ -1557,22 +1600,191 @@ def _new_func_doc(files: list[_File]) -> str:
             if not sentences or _note_moved(sentences[0], removed):
                 continue
             lead = _clean_markup(sentences[0]).strip().rstrip(".")
-            lead = re.split(r"(?i)\be\.g\b|\bfor example\b", lead)[0].strip(" ,")
+            lead = re.split(r"(?i)\be\.g\b|\bfor example\b", lead)[0].strip(" ,(")
             words = lead.split()
-            if not (6 <= len(words) <= 22):
+            if len(words) < 6:
                 continue
-            parsed = re.match(r"(?i)^parses\s+(.+)$", lead)
-            if parsed:
-                return "Parse " + parsed.group(1).strip()
-            checks = re.match(r"(?i)^[A-Za-z_]\w*\s+checks\s+that\s+(.+)$", lead)
-            if checks and len(checks.group(1).split()) >= 4:
-                return "Check that " + checks.group(1).strip().rstrip(".")
-            match = re.match(
-                r"(?i)^(?:[A-Za-z_]\w*\s+)?(" + "|".join(_DOC_VERB) + r")\s+(.+)$",
-                lead,
-            )
-            if match and len(match.group(2).split()) >= 4:
-                return f"{_DOC_VERB[match.group(1).lower()]} {match.group(2).strip().rstrip('.')}"
+            if len(words) <= 28:
+                parsed = re.match(r"(?i)^parses\s+(.+)$", lead)
+                if parsed:
+                    return "Parse " + parsed.group(1).strip()
+                checks = re.match(r"(?i)^[A-Za-z_]\w*\s+checks\s+that\s+(.+)$", lead)
+                if checks and len(checks.group(1).split()) >= 4:
+                    return "Check that " + checks.group(1).strip().rstrip(".")
+                match = re.match(
+                    r"(?i)^(?:[A-Za-z_]\w*\s+)?(" + "|".join(_DOC_VERB) + r")\s+(.+)$",
+                    lead,
+                )
+                if match and len(match.group(2).split()) >= 4:
+                    return f"{_DOC_VERB[match.group(1).lower()]} {match.group(2).strip().rstrip('.')}"
+            extra = _lead_act(lead)
+            if extra:
+                leads.append(extra)
+    if len(leads) == 1 and not _strong_alt(files):
+        return leads[0]
+    return ""
+
+
+def _lead_act(lead: str) -> str:
+    """'Returns the hostname … if Nvim is in SSH' is the new function, said as an imperative."""
+    text = re.sub(r"\|[^|]+\|", "", lead)
+    text = re.sub(r"\([^)]*[$/@][^)]*\)", "", text)
+    text = " ".join(text.split()).strip().rstrip(".")
+    match = re.match(r"(?i)^(?:[A-Za-z_]\w*\s+)?(returns?|replaces?)\s+(.+)$", text)
+    if not match:
+        return ""
+    verb, rest = match.group(1).lower(), match.group(2).strip().rstrip(".")
+    rest = re.sub(r"(?i),\s*if\s+", " when ", rest)
+    rest = re.sub(r"(?i)\bif\s+", "when ", rest, count=1)
+    imperative = "Return" if verb.startswith("return") else "Replace"
+    line = f"{imperative} {rest}"
+    if not (6 <= len(line.split()) <= 24):
+        return ""
+    if imperative == "Return" and not re.search(r"\b(when|for|while|unless|instead)\b", rest, re.I):
+        return ""
+    return line
+
+
+def _strong_alt(files: list[_File]) -> bool:
+    """An alt the promoter would already ship. A new fact must not hide it."""
+    return any(score >= 18 for score, _text in _alt_candidates(files))
+
+
+def _or_extension(files: list[_File]) -> str:
+    """A comment that only grows by 'or X' is adding that case."""
+    if _strong_alt(files):
+        return ""
+    for item in _library_files(files):
+        olds = [" ".join(_clean_markup(sentence).split()) for sentence in _sentences(item.removed)]
+        for sentence in _sentences(item.added):
+            new = " ".join(_clean_markup(sentence).split())
+            for old in olds:
+                if len(old) < 24 or len(new) <= len(old):
+                    continue
+                if SequenceMatcher(None, old.casefold(), new.casefold()).ratio() < 0.8:
+                    continue
+                extra = _inserted_words(old, new)
+                match = re.fullmatch(r"(?i)or\s+(\S+)", extra.strip(" ."))
+                if not match:
+                    continue
+                added_case = match.group(1).strip(" .`")
+                if not added_case or len(added_case) > 24:
+                    continue
+                pred = re.search(r"(?i)does not ([a-z][^.]{8,80}?) on\b", old)
+                if not pred:
+                    continue
+                return f"Do not {pred.group(1).strip()} on {added_case} either"
+    return ""
+
+
+def _inserted_words(old: str, new: str) -> str:
+    old_w = re.findall(r"[A-Za-z0-9_]+|[^\s\w]", old)
+    new_w = re.findall(r"[A-Za-z0-9_]+|[^\s\w]", new)
+    matcher = SequenceMatcher(None, [word.casefold() for word in old_w], [word.casefold() for word in new_w])
+    bits: list[str] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "insert":
+            bits.extend(new_w[j1:j2])
+        elif tag == "replace" and (i2 - i1) <= 1 and (j2 - j1) <= 4:
+            bits.extend(new_w[j1:j2])
+    return " ".join(bits)
+
+
+def _call_moved_into_pcall(files: list[_File]) -> str:
+    """A call that used to run after pcall now runs inside it, so the old failure path covers it."""
+    if _strong_alt(files):
+        return ""
+    for item in _library_files(files):
+        removed = "\n".join(item.removed)
+        added = "\n".join(item.added)
+        body = re.search(r"pcall\s*\(\s*function\s*\([^)]*\)(.*?)end\s*\)", added, re.S)
+        if not body or "pcall" not in removed:
+            continue
+        call = r"(?<![\w.])([A-Za-z_][\w.]*)\s*\("
+        already = set(re.findall(r"pcall\s*\(\s*([A-Za-z_][\w.]*)", removed))
+        inner = re.findall(call, body.group(1))
+        outside: list[str] = []
+        for raw in item.removed:
+            if "pcall" in raw:
+                continue
+            outside.extend(re.findall(call, raw))
+        moved = [
+            name for name in dict.fromkeys(inner)
+            if name in outside and name not in already and name not in {"function", "end", "return"}
+        ]
+        if len(moved) != 1:
+            continue
+        return f"Call {moved[0]} inside the pcall so a failure uses the existing error path"
+    return ""
+
+
+def _interrupted_ctrl_c(files: list[_File]) -> str:
+    """A new 'interrupted' result next to a CTRL-C note is the cancel path."""
+    if _strong_alt(files):
+        return ""
+    for item in _library_files(files):
+        added = "\n".join(item.added)
+        removed = "\n".join(item.removed)
+        if re.search(r"['\"]interrupted['\"]", removed):
+            continue
+        if not re.search(r"==\s*['\"]interrupted['\"]", added):
+            continue
+        notes = added + "\n" + " ".join(_sentences(item.added))
+        if "ctrl-c" not in notes.casefold():
+            continue
+        if not re.search(r"\breturn\s+nil\b", added):
+            continue
+        return "On CTRL-C, stop and return nil instead of raising the interrupted result"
+    return ""
+
+
+def _stricter_when_off(files: list[_File]) -> str:
+    """`if !flag { LegacyValidation.IsValid... }` restores the strict check when the flag is off."""
+    if _strong_alt(files):
+        return ""
+    for item in _library_files(files):
+        added = "\n".join(item.added)
+        removed = "\n".join(item.removed)
+        match = re.search(
+            r"if\s+!\s*([A-Za-z_][A-Za-z0-9_]*)\s*\{"
+            r"([^{}]{0,220}LegacyValidation\.[A-Za-z0-9_.]*IsValid([A-Za-z0-9_]*))",
+            added,
+        )
+        if not match:
+            continue
+        flag, _window, kind = match.group(1), match.group(2), match.group(3)
+        if re.search(rf"\b{re.escape(flag)}\b", removed):
+            continue
+        what = _humanize(kind).lower() if kind else "name"
+        if not what or what in {"valid", "name"}:
+            what = "name"
+        return f"Use legacy validation for a {what} when {flag} is off"
+    return ""
+
+
+def _branched_literal(files: list[_File]) -> str:
+    """The old `left = "*"` now prints something else when a new field is set."""
+    if _strong_alt(files):
+        return ""
+    for item in _library_files(files):
+        added = " ".join(raw.strip() for raw in item.added)
+        removed = " ".join(raw.strip() for raw in item.removed)
+        if not re.search(r"=\s*[\"']\*['\"]", removed):
+            continue
+        match = re.search(
+            r"if\s*\(\s*((?:node|n)\.[A-Za-z_][A-Za-z0-9_]*)\s*\)\s*\{?\s*"
+            r"(?:left|right|value|out|result)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*\("
+            r".{0,180}?"
+            r"else\s*\{?\s*"
+            r"(?:left|right|value|out|result)\s*=\s*[\"']\*['\"]",
+            added,
+        )
+        if not match:
+            continue
+        cond, call = match.group(1), match.group(2)
+        if call in {"if", "function", "print"}:
+            continue
+        return f"Use {call} when {cond} is set, and * otherwise"
     return ""
 
 
@@ -1594,6 +1806,742 @@ def _deprecated_added(files: list[_File]) -> str:
     if len(names) == 1:
         return f"Add the deprecated {names[0]} function"
     return f"Add the deprecated {_and(names[:3])} functions"
+
+
+def _inventory_behavior(files: list[_File]) -> str:
+    """A true behavior sentence for a line that would otherwise name a helper.
+
+    Only runs when every earlier fact missed. A scored alt stays in charge.
+    """
+    if _strong_alt(files):
+        return ""
+    return (
+        _fast_api(files)
+        or _nil_declines(files)
+        or _wrapped_args(files)
+        or _return_err_swap(files)
+        or _past_end(files)
+        or _getenv_field(files)
+        or _reuse_nil_buffer(files)
+        or _warn_after_success(files)
+        or _stop_repeated_error(files)
+        or _prerelease_min(files)
+        or _class_translate(files)
+        or _cache_field(files)
+        or _hash_slot_remove(files)
+        or _strlen_swap(files)
+        or _patch_count(files)
+        or _not_applied(files)
+        or _abbrev_env(files)
+        or _shift_bits(files)
+        or _float_zero(files)
+        or _case_own_node(files)
+        or _would_loop(files)
+        or _tail_length(files)
+        or _imperative_note(files)
+        or _single_test_title(files)
+    )
+
+
+def _wrapped_args(files: list[_File]) -> str:
+    """`Add(a, b)` becoming `Add(unescape(a), unescape(b))` is the change."""
+    hits: list[tuple[str, str]] = []
+    for item in _library_files(files):
+        pairs = _pair_lines(_code_lines_raw(item.removed), _code_lines_raw(item.added))
+        for old, new in pairs:
+            found = _same_wrapper(old, new)
+            if found:
+                hits.append(found)
+    if len(hits) != 1:
+        return ""
+    callee, wrapper = hits[0]
+    name = callee.split(".")[-1]
+    if not name or name.casefold() in {"if", "for", "return", "switch"}:
+        return ""
+    if "unescap" in wrapper.casefold() or wrapper.casefold() in {"unreplace", "unescape"}:
+        return f"Unescape the values passed to {name}"
+    if not re.fullmatch(r"[A-Za-z_][\w.]*", wrapper) or len(wrapper) > 32:
+        return ""
+    return f"Pass the arguments of {name} through {wrapper}"
+
+
+def _same_wrapper(old: str, new: str) -> tuple[str, str] | None:
+    old_m = re.search(r"([A-Za-z_][\w.]*)\s*\((.*)\)\s*;?$", old.strip())
+    new_m = re.search(r"([A-Za-z_][\w.]*)\s*\((.*)\)\s*;?$", new.strip())
+    if not old_m or not new_m or old_m.group(1) != new_m.group(1):
+        return None
+    old_args = _split_args(old_m.group(2))
+    new_args = _split_args(new_m.group(2))
+    if not old_args or len(old_args) != len(new_args):
+        return None
+    wrapper = ""
+    wrapped = 0
+    for left, right in zip(old_args, new_args):
+        if left == right:
+            continue
+        match = re.fullmatch(r"([A-Za-z_][\w.]*)\s*\(\s*(.*)\)", right)
+        if not match or " ".join(match.group(2).split()) != left:
+            return None
+        if wrapper and wrapper != match.group(1):
+            return None
+        wrapper = match.group(1)
+        wrapped += 1
+    if wrapped < 1 or not wrapper:
+        return None
+    return old_m.group(1), wrapper
+
+
+def _split_args(text: str) -> list[str]:
+    args: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    for ch in text:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+        if ch == "," and depth == 0:
+            args.append(" ".join("".join(buf).split()))
+            buf = []
+            continue
+        buf.append(ch)
+    tail = " ".join("".join(buf).split())
+    if tail:
+        args.append(tail)
+    return args
+
+
+def _return_err_swap(files: list[_File]) -> str:
+    """`return ss.Err()` becoming `return it.Err()` is which error is reported."""
+    swaps: list[tuple[str, str]] = []
+    for item in _library_files(files):
+        pairs = _pair_lines(_code_lines_raw(item.removed), _code_lines_raw(item.added))
+        for old, new in pairs:
+            old_m = re.search(r"\breturn\s+([A-Za-z_]\w*)\.Err\(\)", old)
+            new_m = re.search(r"\breturn\s+([A-Za-z_]\w*)\.Err\(\)", new)
+            if old_m and new_m and old_m.group(1) != new_m.group(1):
+                swaps.append((old_m.group(1), new_m.group(1)))
+    if len(swaps) < 2 or len(set(swaps)) != 1:
+        return ""
+    old, new = swaps[0]
+    return f"Return the error from {new} instead of {old}"
+
+
+def _past_end(files: list[_File]) -> str:
+    """A new `row >= line_count` check is the bounds the commit adds."""
+    found: list[tuple[str, str]] = []
+    for item in _library_files(files):
+        removed = "\n".join(_code_lines_raw(item.removed))
+        added = "\n".join(_code_lines_raw(item.added))
+        for match in re.finditer(
+            r"\b([A-Za-z_]\w*)\s*(?:>=|>)\s*((?:[\w.]|->)+)",
+            added,
+        ):
+            ident, expr = match.group(1), match.group(2)
+            if match.group(0) in removed:
+                continue
+            last = re.split(r"->|\.", expr)[-1]
+            if not re.search(r"(?i)count|len|length|size", last):
+                continue
+            if ident.casefold() in {"if", "for", "return", "int", "const", "var"}:
+                continue
+            found.append((ident, last))
+    found = list(dict.fromkeys(found))
+    if len(found) != 1:
+        return ""
+    ident, last = found[0]
+    noun = _humanize(re.sub(r"^[a-z]{1,3}_", "", last)).lower()
+    if not noun:
+        return ""
+    area = _domain_word(files)
+    if area:
+        return f"Skip the {area} check when {ident} is past the {noun}"
+    return f"Reject {ident} when it is past the {noun}"
+
+
+_DOMAIN_SKIP = {
+    "index", "parse", "print", "utils", "types", "core", "main", "test", "spec",
+    "value", "count", "line", "lines", "data", "item", "node", "file", "path",
+    "func", "function", "update", "check", "decor", "draw", "screen", "buffer",
+    "internal", "common", "helper", "utils", "model", "util",
+    "bool", "void", "static", "const", "char", "true", "false", "struct",
+    "class", "type", "self", "this", "args", "opts",
+}
+
+
+def _domain_word(files: list[_File]) -> str:
+    """A specific word from the function or file, such as conceal or linode."""
+    found: list[str] = []
+    for item in _library_files(files):
+        header = ""
+        match = re.search(r"@@ .*@@\s*(.*)", item.hunk or "")
+        if match:
+            header = match.group(1)
+        blob = " ".join((header, _hunk_func(item) or "", Path(item.path).stem))
+        bits = re.findall(r"[A-Za-z]{4,}", _humanize(blob))
+        for bit in bits:
+            word = bit.casefold()
+            if len(word) < 5 or word in _DOMAIN_SKIP or not word.isalpha():
+                continue
+            if word not in found:
+                found.append(word)
+    if not found:
+        return ""
+    # The function's own word is first. Prefer it over the file stem.
+    return found[0]
+
+
+def _fast_api(files: list[_File]) -> str:
+    """`fast = true` on a named function allows it in a fast callback."""
+    for item in _library_files(files):
+        added = "\n".join(item.added)
+        removed = "\n".join(item.removed)
+        if not re.search(r"(?m)^\s*fast\s*=\s*true\s*,?\s*$", added):
+            continue
+        if re.search(r"(?m)^\s*fast\s*=\s*true\s*,?\s*$", removed):
+            continue
+        window = "\n".join(item.context + item.added)
+        match = re.search(r"""name\s*=\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]""", window)
+        if not match:
+            continue
+        return f"Allow {match.group(1)}() in an api-fast callback"
+    return ""
+
+
+def _nil_declines(files: list[_File]) -> str:
+    """A new nil return, whose doc says nil means the client should not start."""
+    code = "\n".join("\n".join(item.added) for item in _library_files(files))
+    if not re.search(r"if\s+not\s+\w+\s+then", code) or not re.search(r"\breturn\s+nil\b", code):
+        return ""
+    notes = []
+    for item in files:
+        notes.extend(_sentences(item.added))
+    blob = " ".join(notes)
+    if "should not start" not in blob.casefold() and "returned nil" not in blob.casefold():
+        return ""
+    return "Let cmd() return nil so the client does not start"
+
+
+def _getenv_field(files: list[_File]) -> str:
+    """`os_getenv('VIMRUNTIME')` replaced by `vim.env.VIMRUNTIME`."""
+    found: list[str] = []
+    for item in _library_files(files):
+        removed = "\n".join(item.removed)
+        added = "\n".join(item.added)
+        for name in re.findall(r"""(?i)getenv\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\)""", removed):
+            if name in found:
+                continue
+            if re.search(rf"(?i)getenv\(\s*['\"]{re.escape(name)}['\"]", added):
+                continue
+            if not re.search(rf"(?i)\.env\.{re.escape(name)}\b", added):
+                continue
+            found.append(name)
+    if len(found) != 1:
+        return ""
+    return f"Read {found[0]} from the env table instead of calling getenv"
+
+
+def _reuse_nil_buffer(files: list[_File]) -> str:
+    """`AtHistogram(nil)` becoming `AtHistogram(buf)` reuses the buffer."""
+    for item in _library_files(files):
+        removed = "\n".join(_code_lines_raw(item.removed))
+        added = "\n".join(_code_lines_raw(item.added))
+        old = re.search(r"\.([A-Za-z_]\w*)\(\s*nil\s*\)", removed)
+        new = re.search(r"\.([A-Za-z_]\w*)\(\s*([A-Za-z_]\w*)\s*\)", added)
+        if not old or not new or old.group(1) != new.group(1):
+            continue
+        buf = new.group(1) and new.group(2)
+        if not buf or buf in {"nil", "null", "none"}:
+            continue
+        if f"{buf} == nil" not in added and f"{buf}==nil" not in added.replace(" ", ""):
+            continue
+        return f"Reuse {buf} in {new.group(1)} instead of passing nil"
+    return ""
+
+
+def _warn_after_success(files: list[_File]) -> str:
+    """A warning that moved under `if err == nil` no longer fires on a parse error."""
+    for item in _library_files(files):
+        removed = "\n".join(item.removed)
+        added = "\n".join(item.added)
+        if "err == nil" not in added or "err == nil" in removed:
+            continue
+        match = re.search(r'(?:Warn|Warning)\w*\([^"\n]*"([^"\n]{12,90})"', added)
+        if not match or match.group(1) not in removed:
+            continue
+        message = match.group(1).split(",")[0].strip().rstrip(".")
+        topic = re.match(r"(?i)^(.+?)\s+(?:are|is) not\b", message)
+        shown = topic.group(1) if topic else " ".join(message.split()[:5])
+        shown = shown[0].lower() + shown[1:]
+        return f"Skip the warning about {shown} when that step failed"
+    return ""
+
+
+def _stop_repeated_error(files: list[_File]) -> str:
+    """A new comment about a repeating error, next to a new `stop()` call."""
+    for item in _library_files(files):
+        notes = " ".join(_sentences(item.added)).casefold()
+        if "repeat" not in notes or "error" not in notes:
+            continue
+        removed = "\n".join(item.removed)
+        added = "\n".join(item.added)
+        if re.search(r"[:.]stop\s*\(", added, re.I) and not re.search(r"[:.]stop\s*\(", removed, re.I):
+            return "Stop when a persistent error repeats, so it is not reported on every iteration"
+    return ""
+
+
+def _prerelease_min(files: list[_File]) -> str:
+    """A prerelease used to return nil. It now returns the version tag."""
+    for item in _library_files(files):
+        removed = "\n".join(_code_lines_raw(item.removed))
+        added = "\n".join(_code_lines_raw(item.added))
+        if "prerelease" not in removed.casefold() or "prerelease" not in added.casefold():
+            continue
+        if not re.search(r"\bnil\b", removed) or re.search(r"\bnil\b", added):
+            continue
+        if "format" not in added and "%s" not in added:
+            continue
+        return "Return the prerelease tag as a minimum version instead of nil"
+    return ""
+
+
+def _class_translate(files: list[_File]) -> str:
+    """Two quoted character classes in one new comment are the translation."""
+    found: list[tuple[str, str, str]] = []
+    for item in _library_files(files):
+        removed = _removed_notes(item)
+        for sentence in _sentences(item.added):
+            if _note_moved(sentence, removed):
+                continue
+            text = " ".join(_clean_markup(sentence).split())
+            quotes = re.findall(r'["\'`]([^"\'`]{1,16})["\'`]', text)
+            if len(quotes) < 2 or "[" not in quotes[0]:
+                continue
+            names = re.findall(r"\b([A-Z][A-Za-z0-9]+)\b", text)
+            found.append((text, quotes[0], quotes[1] if len(names) < 2 else quotes[1]))
+            if len(names) >= 2:
+                found[-1] = (names[0] + "|" + names[1], quotes[0], quotes[1])
+    if len(found) != 1:
+        return ""
+    label, left, right = found[0]
+    if "|" in label:
+        source, dest = label.split("|", 1)
+        return f'Translate {source} "{left}" character classes to {dest} "{right}"'
+    return f'Translate "{left}" character classes to "{right}"'
+
+
+def _cache_field(files: list[_File]) -> str:
+    """`if (field < 0) field = num` next to a comment that says it is cached."""
+    for item in _library_files(files):
+        added = "\n".join(item.added)
+        removed = "\n".join(item.removed)
+        match = re.search(r"if\s*\(\s*[\w.>:-]*?(\w+)\s*<\s*0\s*\)", added)
+        if not match or match.group(0) in removed:
+            continue
+        field = match.group(1)
+        notes = " ".join(_trailing_comments(item) + _sentences(item.added)).casefold()
+        if "cach" not in notes:
+            continue
+        # The `< 0` test is the sentinel, not a later read of the stored width.
+        return f"Store {field} once it has been computed"
+    return ""
+
+
+def _trailing_comments(item: _File) -> list[str]:
+    """Comments that share a line with code. `_sentences` only sees full-line notes."""
+    removed = set()
+    for raw in item.removed:
+        for mark in ("//", "--"):
+            if mark in raw and not raw.strip().startswith(mark):
+                removed.add(raw.split(mark, 1)[1].strip().lstrip("/< ").strip())
+    notes: list[str] = []
+    for raw in item.added:
+        text = raw.strip()
+        if text.startswith(("//", "--", "#", "/*", "*")):
+            continue
+        note = ""
+        if "//" in raw:
+            note = raw.split("//", 1)[1]
+        elif "--" in raw:
+            note = raw.split("--", 1)[1]
+        note = note.strip().lstrip("/< ").strip()
+        if not note or note in removed or len(note.split()) < 2 or len(note.split()) > 18:
+            continue
+        notes.append(note)
+    return notes
+
+
+def _hash_slot_remove(files: list[_File]) -> str:
+    """`dict_item_remove` replaced by `hash_remove` plus a free."""
+    for item in _library_files(files):
+        removed = "\n".join(_code_lines_raw(item.removed))
+        added = "\n".join(_code_lines_raw(item.added))
+        old = re.search(r"\b([A-Za-z_]\w*_remove)\s*\(", removed)
+        if not old or "hash_remove" not in added or not re.search(r"\b\w*_free\s*\(", added):
+            continue
+        if "hash_remove" in removed:
+            continue
+        return f"Remove the item from its hash slot and free it instead of calling {old.group(1)}"
+    return ""
+
+
+def _strlen_swap(files: list[_File]) -> str:
+    """`strlen(line)` replaced by the line's own length function."""
+    found: list[str] = []
+    for item in _library_files(files):
+        pairs = _pair_lines(_code_lines_raw(item.removed), _code_lines_raw(item.added))
+        for old, new in pairs:
+            if "strlen" not in old or "strlen" in new:
+                continue
+            match = re.search(r"\b([A-Za-z_]\w*len\w*)\s*\(", new)
+            if not match or match.group(1) == "strlen":
+                continue
+            if match.group(1) not in found:
+                found.append(match.group(1))
+    if len(found) != 1:
+        return ""
+    return f"Measure the line with {found[0]} instead of strlen"
+
+
+def _patch_count(files: list[_File]) -> str:
+    """The only edit to a patch-count array is the new total."""
+    for item in _library_files(files):
+        removed = "\n".join(_code_lines_raw(item.removed))
+        added = "\n".join(_code_lines_raw(item.added))
+        if "num_patches" not in removed or "num_patches" not in added:
+            continue
+        old = re.search(r"num_patches\[\]\s*=\s*\{[^}]*\b(\d+)\s*\}", removed)
+        new = re.search(r"num_patches\[\]\s*=\s*\{[^}]*\b(\d+)\s*\}", added)
+        if not old or not new or old.group(1) == new.group(1):
+            continue
+        return f"Raise the included patch count from {old.group(1)} to {new.group(1)}"
+    return ""
+
+
+_TEST_TITLE = re.compile(r"""(?:\bit|\btest|\bspecify)\s*\(\s*(['"])(.{8,160}?)\1""")
+
+
+_NOTE_VERB = {
+    "drain": "Drain", "clamp": "Clamp", "reconnect": "Reconnect", "persist": "Persist",
+    "merge": "Merge", "reorder": "Reorder", "align": "Align", "detect": "Detect",
+    "convert": "Convert", "normalize": "Normalize", "indent": "Indent",
+    "attach": "Attach", "validate": "Validate", "acquire": "Acquire",
+    "compare": "Compare", "abbreviate": "Abbreviate", "unescape": "Unescape",
+}
+
+
+def _imperative_note(files: list[_File]) -> str:
+    """One new comment that already starts with the behavior."""
+    found: list[str] = []
+    for item in _library_files(files):
+        removed = _removed_notes(item)
+        for sentence in _sentences(item.added):
+            if _note_moved(sentence, removed):
+                continue
+            text = _clean_markup(sentence)
+            text = re.sub(r"https?://\S+", "", text)
+            text = " ".join(text.split()).strip().rstrip(".")
+            words = text.split()
+            if not (6 <= len(words) <= 36):
+                continue
+            if "|" in text or "$" in text:
+                continue
+            # Two comments glued together capitalize a word in the middle.
+            if any(
+                word[:1].isupper() and word.isalpha() and not word.isupper() and len(word) > 3
+                for word in words[1:]
+            ):
+                continue
+            first = words[0].casefold().rstrip(",:;")
+            if first not in _NOTE_VERB:
+                continue
+            line = f"{_NOTE_VERB[first]} " + " ".join(words[1:])
+            if line not in found:
+                found.append(line)
+    if len(found) != 1:
+        return ""
+    line = found[0]
+    # The next comment often says why. "will deadlock unless … drained" is that reason.
+    if "deadlock" not in line.casefold():
+        for item in _library_files(files):
+            blob = " ".join(_sentences(item.added)).casefold()
+            if "deadlock" not in blob:
+                continue
+            where = "a refresh" if "refresh" in blob else "the watcher"
+            line = f"{line}, so {where} does not deadlock"
+            break
+    return line
+
+
+def _single_test_title(files: list[_File]) -> str:
+    """One new test title, when the code line would only name a helper."""
+    titles: list[str] = []
+    for item in files:
+        if not _is_test(item.path):
+            continue
+        for _quote, title in _TEST_TITLE.findall("\n".join(item.added)):
+            clean = _clean_title(title)
+            if clean and clean not in titles:
+                titles.append(clean)
+    if len(titles) > 1:
+        # Keep the regression title when it is the only one that named an issue.
+        raws = []
+        for item in files:
+            if not _is_test(item.path):
+                continue
+            raws.extend(title for _quote, title in _TEST_TITLE.findall("\n".join(item.added)))
+        marked = [_clean_title(title) for title in raws if re.search(r"#\d{3,}", title)]
+        marked = [title for title in marked if title]
+        if len(set(marked)) == 1:
+            titles = [marked[0]]
+        else:
+            usable = [title for title in titles if _title_line(title)]
+            if len(usable) == 1:
+                titles = usable
+            else:
+                shared = _shared_title(titles)
+                if shared and _title_line(shared):
+                    titles = [shared]
+    if len(titles) != 1:
+        return ""
+    line = _title_line(titles[0])
+    if not line or not (3 <= len(line.split()) <= 24):
+        return ""
+    # A test-only diff does not fix the crash. The title is the regression.
+    if not _library_files(files) and line.casefold().startswith("avoid a crash when "):
+        rest = line.split(" when ", 1)[1]
+        line = f"Add a regression test for when {rest}"
+    return line
+
+
+def _shared_title(titles: list[str]) -> str:
+    """The words every title starts with, when that prefix is the whole fact."""
+    rows = [title.split() for title in titles if title.split()]
+    if len(rows) < 2:
+        return ""
+    prefix: list[str] = []
+    for bits in zip(*rows):
+        if len({bit.casefold() for bit in bits}) != 1:
+            break
+        prefix.append(bits[0])
+    if len(prefix) < 6:
+        return ""
+    return " ".join(prefix)
+
+
+def _clean_title(title: str) -> str:
+    text = title.replace("`", "")
+    text = re.sub(r"\s*#\d+\s*$", "", text)
+    # `exec_stuffed: count before a register…` The group name is not the fact.
+    text = re.sub(r"^[A-Za-z_][A-Za-z0-9_]*:\s+", "", text)
+    text = " ".join(text.split()).strip().rstrip(".")
+    if not text or "-" in text and " " not in text:
+        return ""
+    return text
+
+
+def _title_line(title: str) -> str:
+    """Turn one test title into an imperative. A noun phrase stays unused."""
+    text = title.strip()
+    match = re.match(r"(?i)^(.+?) interrupts (.+)$", text)
+    if match and 1 <= len(match.group(1).split()) <= 4:
+        return f"Make {match.group(2).strip()} interruptible by {match.group(1).strip()}"
+    match = re.match(r"(?i)^no crash when (.+)$", text)
+    if match:
+        return f"Avoid a crash when {match.group(1).strip()}"
+    match = re.match(r"(?i)^(.+?) reports an error once when (.+)$", text)
+    if match:
+        return f"Report an error from {match.group(1).strip()} once when {match.group(2).strip()}"
+    match = re.match(r"(?i)^(.+?) uses? (.+?) if (.+)$", text)
+    if match:
+        return f"Use {match.group(2).strip()} for {match.group(1).strip()} when {match.group(3).strip()}"
+    match = re.match(r"(?i)^count before (.+?) is applied once(?: to (.+))?$", text)
+    if match:
+        what = match.group(1).strip()
+        target = (match.group(2) or "").strip()
+        if target:
+            return f"Apply a count before {what} once to {target}"
+        return f"Apply a count before {what} once"
+    match = re.match(r'(?i)^"(.+)" glob excludes (.+)$', text)
+    if match:
+        return f'Exclude {match.group(2).strip()} from a "{match.group(1)}" glob'
+    match = re.match(r"(?i)^(.+?) can return (.+)$", text)
+    if match and len(match.group(1).split()) <= 6:
+        return f"Let {match.group(1).strip()} return {match.group(2).strip()}"
+    match = re.match(r"(?i)^(.+?) returning (.+)$", text)
+    if match and len(match.group(1).split()) <= 4:
+        return f"Allow {match.group(1).strip()} to return {match.group(2).strip()}"
+    match = re.match(r"(?i)^no-op (.+)$", text)
+    if match:
+        return f"Handle a no-op {match.group(1).strip()}"
+    match = re.match(r"(?i)^releases? (.+)$", text)
+    if match and 2 <= len(match.group(1).split()) <= 8:
+        return f"Release {match.group(1).strip()}"
+    return ""
+
+
+def _not_applied(files: list[_File]) -> str:
+    """'A window due for a full redraw is not scrolled' is the new guard."""
+    verb = {
+        "scrolled": "scroll",
+        "applied": "apply",
+        "merged": "merge",
+        "reused": "reuse",
+        "loaded": "load",
+        "printed": "print",
+    }
+    found: list[str] = []
+    for item in _library_files(files):
+        removed = _removed_notes(item)
+        for sentence in _sentences(item.added):
+            if _note_moved(sentence, removed):
+                continue
+            text = " ".join(_clean_markup(sentence).split()).rstrip(".")
+            match = re.search(
+                r"(?i)^(.{6,70}?) is not (scrolled|applied|merged|reused|loaded|printed)\b",
+                text,
+            )
+            if not match:
+                continue
+            subject = match.group(1).strip()
+            action = verb[match.group(2).lower()]
+            if subject[0].isupper():
+                subject = subject[0].lower() + subject[1:]
+            line = f"Do not {action} {subject}"
+            if line not in found:
+                found.append(line)
+    if len(found) != 1:
+        return ""
+    return found[0]
+
+
+def _abbrev_env(files: list[_File]) -> str:
+    """'Full path, with $VIMRUNTIME abbreviated' is the log header change."""
+    found: list[str] = []
+    for item in _library_files(files):
+        removed = _removed_notes(item)
+        for sentence in _sentences(item.added):
+            if _note_moved(sentence, removed):
+                continue
+            text = " ".join(_clean_markup(sentence).split())
+            match = re.search(r"\$([A-Z_][A-Z0-9_]*)", text)
+            if not match or "abbreviated" not in text.casefold():
+                continue
+            if match.group(1) not in found:
+                found.append(match.group(1))
+    if len(found) != 1:
+        return ""
+    return f"Show the full caller path, with ${found[0]} abbreviated"
+
+
+def _shift_bits(files: list[_File]) -> str:
+    """`<< 20` becoming `<< 30` is the unit the value is scaled by."""
+    found: list[tuple[str, str]] = []
+    for item in _library_files(files):
+        pairs = _pair_lines(_code_lines_raw(item.removed), _code_lines_raw(item.added))
+        for old, new in pairs:
+            old_m = re.search(r"<<\s*(\d+)", old)
+            new_m = re.search(r"<<\s*(\d+)", new)
+            if not old_m or not new_m or old_m.group(1) == new_m.group(1):
+                continue
+            found.append((old_m.group(1), new_m.group(1)))
+    found = list(dict.fromkeys(found))
+    if len(found) != 1:
+        return ""
+    old, new = found[0]
+    units = {"10": "KiB", "20": "MiB", "30": "GiB"}
+    blob = "\n".join(
+        item.path + "\n" + "\n".join(item.added + item.removed)
+        for item in _library_files(files)
+    )
+    if old in units and new in units and re.search(r"(?i)byte|transfer", blob):
+        return f"Shift transfer bytes by {units[new]} instead of {units[old]}"
+    return f"Shift left by {new} instead of {old}"
+
+
+def _float_zero(files: list[_File]) -> str:
+    """`GetZeroCount() > 0` gaining `GetZeroCountFloat() > 0` counts the float too."""
+    for item in _library_files(files):
+        removed = "\n".join(_code_lines_raw(item.removed))
+        added = "\n".join(_code_lines_raw(item.added))
+        match = re.search(
+            r"(?:[\w.]+\.)?([A-Za-z_]\w*)\(\)\s*>\s*0\s*\|\|\s*"
+            r"(?:[\w.]+\.)?([A-Za-z_]\w*Float)\(\)\s*>\s*0",
+            added,
+        )
+        if not match or match.group(2) in removed:
+            continue
+        return f"Treat a positive {match.group(2)} the same as {match.group(1)}"
+    return ""
+
+
+def _case_own_node(files: list[_File]) -> str:
+    """A case whose comment said 'Transformed into text' now prints itself."""
+    for item in _library_files(files):
+        removed = "\n".join(item.removed)
+        added = "\n".join(item.added)
+        match = re.search(
+            r'case\s+["\'](\w+)["\']\s*:\s*(?://|/\*|<!--)\s*Transformed into [`\'"]?(\w+)',
+            removed,
+        )
+        if not match:
+            continue
+        kind, into = match.group(1), match.group(2)
+        if re.search(rf'case\s+["\']{re.escape(kind)}["\']\s*:\s*(?://|/\*).*Transformed', added):
+            continue
+        if kind not in added.casefold() and kind not in added:
+            continue
+        return f"Stop treating {kind} as {into} and print it as its own node"
+    return ""
+
+
+def _would_loop(files: list[_File]) -> str:
+    """'can round back to s, which would loop forever' is why the loop steps."""
+    found: list[str] = []
+    for item in _library_files(files):
+        removed = _removed_notes(item)
+        for sentence in _sentences(item.added):
+            if _note_moved(sentence, removed):
+                continue
+            text = " ".join(_clean_markup(sentence).split()).rstrip(".")
+            match = re.match(r"(?i)^(.+?) can (.+), which would (.+)$", text)
+            if not match:
+                continue
+            subject, action, tail = match.group(1).strip(), match.group(2).strip(), match.group(3).strip()
+            if not (2 <= len(subject.split()) <= 8) or len(action.split()) > 10:
+                continue
+            if subject[0].isupper():
+                subject = subject[0].lower() + subject[1:]
+            verb = action.split()[0]
+            if verb.endswith("e") and not verb.endswith("ee") and verb.isalpha():
+                verb = verb[:-1] + "ing"
+            elif verb.isalpha() and not verb.endswith("ing"):
+                verb = verb + "ing"
+            action = verb + ((" " + " ".join(action.split()[1:])) if len(action.split()) > 1 else "")
+            line = f"Keep {subject} from {action}, which would {tail}"
+            if line not in found:
+                found.append(line)
+    if len(found) != 1:
+        return ""
+    return found[0]
+
+
+def _tail_length(files: list[_File]) -> str:
+    """`len(in)` becoming `len(in) - mini` measures the tail, not the whole slice."""
+    for item in _library_files(files):
+        pairs = _pair_lines(_code_lines_raw(item.removed), _code_lines_raw(item.added))
+        for old, new in pairs:
+            match = re.search(
+                r"^(\s*\w+\s*:?=\s*)len\((\w+)\)\s*$",
+                old,
+            )
+            if not match:
+                continue
+            name = match.group(2)
+            if re.search(rf"len\({re.escape(name)}\)\s*-\s*(\w+)", new):
+                end = re.search(rf"len\({re.escape(name)}\)\s*-\s*(\w+)", new).group(1)
+                return f"Measure len({name}) from {end} to the end instead of the whole slice"
+    return ""
 
 
 def _plain_reason(files: list[_File]) -> str:
@@ -1619,7 +2567,10 @@ def _plain_reason(files: list[_File]) -> str:
             text = _clean_markup(sentence)
             text = re.sub(r"https?://\S+", "", text)
             text = " ".join(text.split()).strip().rstrip(".")
-            if text.lower().startswith(("@param", "@return", "@type", "copyright", "licensed", "todo", "note", "xxx", "fixme", "hack")):
+            if text.lower().startswith(("@param", "@return", "@type", "copyright", "licensed", "todo", "note", "xxx", "fixme", "hack", "example", "usage")):
+                continue
+            # A shell invocation or a help-menu key is not the behavior.
+            if text.count("/") >= 2 or text.startswith("(") or '":' in text or "$" in text:
                 continue
             # A colon imperative may sit past the usual 28 words, after an "e.g." aside.
             if not (8 <= len(text.split()) <= 40):
@@ -3766,15 +4717,26 @@ def _best_claim(files: list[_File]) -> str:
     best = ""
     best_score = 0
     home = files[0]
+    code_here = any(
+        not _is_doc_path(item.path)
+        and not _is_test(item.path)
+        and not _noise(item)
+        and (item.added or item.removed)
+        for item in files
+    )
     for item in files:
         if _noise(item) or _is_manifest(item.path):
             continue
+        # A changelog heading that only gained an issue number is not the code change.
+        if code_here and _is_doc_path(item.path):
+            continue
         sentences = _sentences(item.added)
-        removed_notes = "\n".join(_removed_notes(item))
+        removed_notes = _removed_notes(item)
         for index, sentence in enumerate(sentences):
             # A comment that moved unchanged is not the new behavior.
-            # A wording tweak can still be the change, so only an exact copy is skipped.
-            if _clean_markup(sentence).casefold() in removed_notes:
+            # A one-token tweak of a long note is the same fact. A real rewrite still counts.
+            clean = _clean_markup(sentence).casefold()
+            if clean in removed_notes or _almost_copied(clean, removed_notes):
                 continue
             prev = sentences[index - 1] if index else ""
             nxt = sentences[index + 1] if index + 1 < len(sentences) else ""
@@ -4019,18 +4981,25 @@ def _alt_paren_case(files: list[_File]) -> str:
         )
     if len(set(nodes)) != 1:
         return ""
+    node = re.sub(r"([a-z])([A-Z])", r"\1 \2", nodes[0]).lower()
     label = ""
     for item in files:
         if item.removed or not item.added or not _is_test(item.path):
             continue
         folder = Path(item.path).parent.name.replace("_", "-")
-        if folder.casefold() in {"test", "tests", "format", "src", "__tests__"}:
+        key = re.sub(r"[^a-z0-9]", "", folder.casefold())
+        if key in {"test", "tests", "format", "src", "snapshots", "snap", "fixtures", "testdata", "spec"}:
+            continue
+        if "plugin" in key:
             continue
         if "-" not in folder and folder.casefold() == folder:
             continue
-        label = folder.replace("-", " ")
+        candidate = folder.replace("-", " ")
+        # "instantiation expression" inside "tsinstantiation expression" adds nothing.
+        if all(word in node for word in candidate.split()):
+            continue
+        label = candidate
         break
-    node = re.sub(r"([a-z])([A-Z])", r"\1 \2", nodes[0]).lower()
     article = "an" if (label or node)[:1].lower() in "aeiou" else "a"
     if label:
         return f"Parenthesize {article} {label} in a {node}"
@@ -4570,7 +5539,8 @@ def _context_send(files: list[_File]) -> str:
             continue
         added = "\n".join(item.added)
         removed = "\n".join(item.removed)
-        if "Done()" in added and "select" in added and ("<-" in removed or "msgs" in removed):
+        # An unguarded `msgs <-` that gained a `ctx.Done` case. `WaitGroup.Done` is not that.
+        if "ctx.Done()" in added and "msgs <-" in removed and "select" in added:
             return "Make the send respect context cancellation"
     return ""
 
@@ -5390,7 +6360,7 @@ def _best_purpose(item: _File) -> str:
             low = " " + text.casefold() + " "
             words = text.split()
         first = words[0].casefold().rstrip(",:;")
-        if first not in _OPEN and first not in {"apply", "land", "compare", "advise", "end"}:
+        if first not in _OPEN and first not in {"apply", "land", "compare", "advise", "end", "acquire"}:
             # "X is preserved, so Y" → "Preserve X so Y" when that stays short.
             kept = _as_imperative(text)
             if not kept:
@@ -5402,7 +6372,8 @@ def _best_purpose(item: _File) -> str:
                 continue
         if not any(cue in low for cue in (" so ", " to ", " instead ", " before ", " avoid", " when ")):
             continue
-        score = 10 + (4 if " so " in low else 0) - len(words)
+        # A short "when" aside must not beat the comment that says why.
+        score = 10 + (24 if " so " in low else 0) - len(words)
         if score > best_score:
             best, best_score = text, score
     if not best:
@@ -5961,6 +6932,17 @@ def _renamed(files: list[_File]) -> str:
     # A couple of swapped locals is not a rename commit. Require a repeated swap.
     if count < 4 or not _strong(old) or not _strong(new):
         return ""
+    # `scrapeErr` to `forcedErr` is a local. A long function name can still be a rename.
+    if (
+        old[:1].islower() and new[:1].islower()
+        and "." not in old and "." not in new
+        and len(old) < 16 and len(new) < 16
+    ):
+        return ""
+    # The new name already existed. Call sites moved onto it.
+    removed_blob = "\n".join("\n".join(item.removed) for item in files)
+    if re.search(rf"\b{re.escape(new)}\b", removed_blob):
+        return ""
     return f"Rename {old} to {new}"
 
 
@@ -6369,8 +7351,8 @@ def _keeps_effect(line: str, draft: str) -> bool:
         return True
     folded = line.casefold()
     hit = sum(1 for tok in words if tok.casefold() in folded)
-    # One or two content words are the whole effect. Dropping either is a miss.
-    need = len(words) if len(words) <= 2 else len(words) - 1
+    # A short effect is the whole fact. Dropping "redraw" from three words is a miss.
+    need = len(words) if len(words) <= 3 else len(words) - 1
     return hit >= need
 
 
@@ -6521,7 +7503,7 @@ def _parse(patch: str) -> list[_File]:
                 cur._doc_from_context = False
             cur._cur_w += 1
             _note_body(cur, text)
-        elif raw.startswith("-") and not raw.startswith("---"):
+        elif raw.startswith("-") and not (cur.nhunks == 0 and raw.startswith("---")):
             text = raw[1:]
             cur.removed.append(text)
             cur._cur_w += 1

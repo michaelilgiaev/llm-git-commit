@@ -574,6 +574,29 @@ def test_pick_rejects_a_dropped_contrast():
     assert harness.pick(flipped, draft, f"draft: {draft}") == draft
 
 
+def test_pick_rejects_a_rephrase_that_drops_redraw():
+    import harness
+    draft = "Do not scroll a window due for a full redraw"
+    weaker = "Fix stale grid offsets when window is not scrolled"
+    assert harness.pick(weaker, draft, f"draft: {draft}") == draft
+
+
+def test_fast_true_allows_the_named_function():
+    patch = """\
+diff --git a/eval.lua b/eval.lua
+--- a/eval.lua
++++ b/eval.lua
+@@ -1,4 +1,5 @@ M.funcs = {
+     ]=],
++    fast = true,
+     name = 'getenv',
+     params = { { 'name', 'string' } },
+"""
+    text = digest.line("", patch)
+    assert "getenv" in text
+    assert "api-fast" in text
+
+
 def test_pick_rejects_an_update_step_down():
     import harness
     draft = "Rename Layer to Content"
@@ -876,3 +899,272 @@ def test_pick_keeps_a_faithful_second_clause():
     draft = "Restore tab stops if we have tab optimizations enabled"
     better = "Restore tab stops if hard tabs are enabled; otherwise, set them to -1"
     assert harness.pick(better, draft, f"draft: {draft}") == better
+
+
+def test_a_new_lua_function_returns_the_documented_value():
+    patch = """\
+diff --git a/util.lua b/util.lua
+--- a/util.lua
++++ b/util.lua
+@@ -1,1 +1,5 @@
++--- Returns the hostname for the statusline, if Nvim is running in a SSH session.
++--- @return string
++function M.remote_host()
++  return ''
++end
+"""
+    text = digest.line("", patch)
+    assert text.startswith("Return the hostname for the statusline when Nvim is running")
+    assert "remote_host" not in text
+
+
+def test_a_comment_that_grows_by_or_names_the_new_case():
+    patch = """\
+diff --git a/editorconfig.lua b/editorconfig.lua
+--- a/editorconfig.lua
++++ b/editorconfig.lua
+@@ -1,4 +1,6 @@ local function glob2regpat(glob)
+---- Modified version of glob2regpat() that does not match path separators on `*`.
++--- Modified version of glob2regpat() that does not match path separators on `*` or `?`.
++local qplaceholder = '@@QUESTION@@'
++return (regpat:gsub(placeholder, '[^/]*'):gsub(qplaceholder, '[^/]'))
+"""
+    text = digest.line("", patch)
+    assert "path separators" in text.casefold()
+    assert "?" in text
+    assert "also check" not in text.casefold()
+
+
+def test_a_call_moved_into_pcall_uses_the_existing_error_path():
+    patch = """\
+diff --git a/editorconfig.lua b/editorconfig.lua
+--- a/editorconfig.lua
++++ b/editorconfig.lua
+@@ -1,6 +1,8 @@ local function parse(filepath, dir)
+-        local ok, regpat = pcall(glob2regpat, glob)
+-          pat = vim.regex(regpat)
++        local ok, regex = pcall(function()
++          return vim.regex(glob2regpat(glob))
++        end)
++          pat = regex
+"""
+    text = digest.line("", patch)
+    assert "vim.regex" in text
+    assert "pcall" in text
+    assert "also check" not in text.casefold()
+
+
+def test_a_star_literal_branches_on_the_new_field():
+    patch = """\
+diff --git a/module.js b/module.js
+--- a/module.js
++++ b/module.js
+@@ -1,5 +1,9 @@ function printModuleSpecifier(path, options, print) {
+-    left = "*";
++  if (node.exportsFilter) {
++    left = printObject(path, options, print);
++  } else {
++    left = "*";
++  }
+"""
+    text = digest.line("", patch)
+    assert "printObject" in text
+    assert "exportsFilter" in text
+    assert "*" in text
+
+
+def test_a_changelog_tweak_does_not_replace_the_code_change():
+    patch = """\
+diff --git a/changelog/20427.md b/changelog/20427.md
+--- a/changelog/20427.md
++++ b/changelog/20427.md
+@@ -1,2 +1,2 @@
+-#### Add support for "Structs", "Import Sync", and "Deferred re-exports" proposal (#20427, #20430, #20430 by @fisker)
++#### Add support for "Structs", "Import Sync", and "Deferred re-exports" proposal (#20427, #20430, #20430, #20438 by @fisker)
+diff --git a/module.js b/module.js
+--- a/module.js
++++ b/module.js
+@@ -1,5 +1,9 @@ function printModuleSpecifier() {
+-    left = "*";
++  if (node.exportsFilter) {
++    left = printObject(path, options, print);
++  } else {
++    left = "*";
++  }
+"""
+    text = digest.line("", patch)
+    assert "Structs" not in text
+    assert "printObject" in text
+
+
+def test_unescape_wraps_both_arguments():
+    patch = """\
+diff --git a/openmetricsparse.go b/openmetricsparse.go
+--- a/openmetricsparse.go
++++ b/openmetricsparse.go
+@@ -1,3 +1,3 @@ func (p *Parser) Exemplar(e *exemplar.Exemplar) bool {
+-    p.builder.Add(s[a:b], s[c:d])
++    p.builder.Add(unreplace(s[a:b]), unreplace(s[c:d]))
+"""
+    text = digest.line("", patch)
+    assert "Unescape" in text
+    assert "Add" in text
+    assert "also check" not in text.casefold()
+
+
+def test_one_test_title_says_the_interrupt():
+    patch = """\
+diff --git a/async.lua b/async.lua
+--- a/async.lua
++++ b/async.lua
+@@ -1,3 +1,6 @@ function Task:wait(timeout, predicate)
++  local done, code = vim.wait(timeout, predicate)
++  if code == -2 then
++    error('interrupted', 0)
+diff --git a/test/functional/lua/async_spec.lua b/test/functional/lua/async_spec.lua
+--- a/test/functional/lua/async_spec.lua
++++ b/test/functional/lua/async_spec.lua
+@@ -1,1 +1,2 @@
++it('CTRL-C interrupts a sync wait', function()
++end)
+"""
+    text = digest.line("", patch)
+    assert "interruptible by CTRL-C" in text
+    assert "also check" not in text.casefold()
+
+
+def test_shared_crash_title_is_one_line():
+    patch = """\
+diff --git a/test/functional/crash_spec.lua b/test/functional/crash_spec.lua
+--- a/test/functional/crash_spec.lua
++++ b/test/functional/crash_spec.lua
+@@ -1,1 +1,4 @@
++it('no crash when ending Visual mode closes the window being closed', function()
++end)
++it('no crash when ending Visual mode closes the window to switch to', function()
++end)
+"""
+    text = digest.line("", patch)
+    assert "regression test" in text.casefold()
+    assert "Visual mode" in text
+    assert "Avoid a crash" not in text
+
+
+def test_count_title_drops_the_group_name():
+    patch = """\
+diff --git a/src/nvim/normal.c b/src/nvim/normal.c
+--- a/src/nvim/normal.c
++++ b/src/nvim/normal.c
+@@ -1,2 +1,2 @@ void exec_stuffed(cmdarg_T *cap)
+-  ca.opcount = count;
++  ca.opcount = 0;
+diff --git a/test/functional/cmdatom_spec.lua b/test/functional/cmdatom_spec.lua
+--- a/test/functional/cmdatom_spec.lua
++++ b/test/functional/cmdatom_spec.lua
+@@ -1,1 +1,2 @@
++it('exec_stuffed: count before a register is applied once #42468', function()
++end)
+"""
+    text = digest.line("", patch)
+    assert "count before a register" in text
+    assert "exec_stuffed" not in text
+
+
+def test_drain_comment_is_the_subject():
+    patch = """\
+diff --git a/tsdb/fileutil/file.go b/tsdb/fileutil/file.go
+--- a/tsdb/fileutil/file.go
++++ b/tsdb/fileutil/file.go
+@@ -1,3 +1,6 @@ func (g *Group) refresh() {
++// Drain watcher events and errors in a dedicated goroutine for the entire lifetime of the watcher.
++go g.drain()
+ }
+"""
+    text = digest.line("", patch)
+    assert text.startswith("Drain watcher")
+    assert "Update" not in text
+
+
+def test_a_code_tail_is_not_a_second_clause():
+    import harness
+    text = harness._drop_code_tail(
+        "Stop the truncate loop before taking the lock; db.mtx.Lock() | defer db.mtx.Unlock()"
+    )
+    assert "Lock" not in text
+    assert text.startswith("Stop the truncate")
+
+
+def test_character_class_comment_names_both_spellings():
+    patch = """\
+diff --git a/editorconfig.lua b/editorconfig.lua
+--- a/editorconfig.lua
++++ b/editorconfig.lua
+@@ -1,2 +1,4 @@ local function glob_to_vim(glob)
++-- EditorConfig negates a character class with "[!seq]", Vim with "[^seq]".
++glob = glob:gsub('[!]', '[^]')
+"""
+    text = digest.line("", patch)
+    assert "[!seq]" in text
+    assert "[^seq]" in text
+    assert "EditorConfig" in text
+
+
+def test_getenv_moves_to_the_env_table():
+    patch = """\
+diff --git a/log.lua b/log.lua
+--- a/log.lua
++++ b/log.lua
+@@ -1,2 +1,1 @@ function header(info)
+-  local vimruntime = vim.uv.os_getenv('VIMRUNTIME')
+-  local rt_path = vimruntime and vim.fs.relpath(vimruntime, src)
++  local rt_path = vim.env.VIMRUNTIME and vim.fs.relpath(vim.env.VIMRUNTIME, src)
+"""
+    text = digest.line("", patch)
+    assert "VIMRUNTIME" in text
+    assert "getenv" in text.casefold()
+
+
+def test_a_window_due_for_redraw_is_not_scrolled():
+    patch = """\
+diff --git a/move.c b/move.c
+--- a/move.c
++++ b/move.c
+@@ -1,2 +1,4 @@ void win_scroll_lines(win_T *wp) {
+-  if (wp->w_grid.target) {
++  // A window due for a full redraw is not scrolled: its grid offsets may be stale.
++  if (wp->w_grid.target
++      && wp->w_redr_type < UPD_NOT_VALID) {
+"""
+    text = digest.line("", patch)
+    assert "redraw" in text.casefold()
+    assert "scroll" in text.casefold()
+    assert "also check" not in text.casefold()
+
+
+def test_shift_constant_names_both_widths():
+    patch = """\
+diff --git a/linode.go b/linode.go
+--- a/linode.go
++++ b/linode.go
+@@ -1,1 +1,1 @@ func refreshData() {
+-  label = strconv.FormatInt(int64(instance.Specs.Transfer)<<20, 10)
++  label = strconv.FormatInt(int64(instance.Specs.Transfer)<<30, 10)
+"""
+    text = digest.line("", patch)
+    assert "GiB" in text and "MiB" in text
+
+
+def test_prerelease_returns_a_version_instead_of_nil():
+    patch = """\
+diff --git a/ssh.lua b/ssh.lua
+--- a/ssh.lua
++++ b/ssh.lua
+@@ -1,2 +1,2 @@ function get_release(ver, base)
+-  return dir, release_url, not ver.prerelease and base or nil
++  return dir, release_url, ver.prerelease and ('%s-%s'):format(base, ver.prerelease) or base
+"""
+    text = digest.line("", patch)
+    assert "prerelease" in text.casefold()
+    assert "nil" in text.casefold()
+    assert "update" not in text.casefold()
+
