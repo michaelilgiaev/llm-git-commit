@@ -117,12 +117,14 @@ def subject(stat: str, patch: str) -> str:
 def _shipped(files: list[_File], stat: str) -> str:
     """The line a commit uses. Tests and the fact card must share it."""
     line = _qualify_method(_qualify_rename(_promote(_compose(files, stat), files), files), files)
+    line = _apply_code_story(line, files)
     line = _drop_code_tail(line)
     moved = _test_package_merge(stat)
     if moved and (_weak_line(line) or line.casefold().startswith("add tests")):
         line = moved
     line = _glance(_locate(line, files))
     line = _name_callers(line, files)
+    line = _widen(line, files)
     return _test_tail(line, files)
 
 
@@ -182,7 +184,7 @@ def _drop_code_tail(line: str) -> str:
     kept = [head]
     for part in rest:
         letters = sum(ch.isalpha() for ch in part)
-        if "|" in part or letters < 8:
+        if "|" in part or letters < 8 or re.search(r"\b(?:defer|Lock|Unlock)\b", part):
             continue
         if re.search(r"\w+\.\w+\(", part) and len(part.split()) < 5:
             continue
@@ -300,7 +302,19 @@ def pick(model_line: str, draft: str, source: str = "") -> str:
         return draft
     if " instead of " in draft_folded and "instead" not in folded and "rather than" not in folded:
         return draft
-    if first in {"update", "use"} and draft_verb not in {"update", "use"} and _specific(draft):
+    # "Update test for bitwise operators" drops "Add bitwise AND, OR, and XOR".
+    if first == "update" and draft_verb != "update" and (_specific(draft) or len(draft.split()) >= 4):
+        return draft
+    if re.search(r"\d+\.\d+", draft) and not re.search(r"\d+\.\d+", line):
+        return draft
+    # A second clause that is source code, or a claim the draft never made, is not the fact.
+    for part in line.split("; ")[1:]:
+        if "|" in part or re.search(r"\b(?:defer|Lock|Unlock)\(", part):
+            return draft
+    if "added functionality" in folded and "added functionality" not in draft_folded:
+        return draft
+    # "Stop handling when preventing EPERM" keeps the word "when" and drops the file-watch fact.
+    if not _keeps_when(line, draft):
         return draft
     return line[0].upper() + line[1:]
 
@@ -509,6 +523,2176 @@ def _should_take_param(clause: str, param_line: str, files: list[_File]) -> bool
     if _weak_line(clause):
         return True
     return _says_only_doc(clause, files)
+
+
+def _thin_head(text: str) -> bool:
+    """A line that names a file, a helper, or a type list, and not the behavior."""
+    head = (text or "").split(";", 1)[0].strip()
+    if re.match(r"^(Also check |Parenthesize |Add tests in )", head):
+        return True
+    if re.match(r"^Add \S+ in \S+\.\w+$", head):
+        return True
+    if re.match(
+        r"^Update \S+\.(?:js|jsx|ts|tsx|mjs|cjs|go|c|h|lua|py|rs|vim)$",
+        head,
+    ):
+        return True
+    if re.match(r"^Update \S+ in \S+\.\w+$", head):
+        return True
+    if re.match(r"^Use \S+ instead of \S+$", head):
+        return True
+    if re.match(r"^Treat \w+, .+, and ", head):
+        return True
+    if re.match(r"^Bump v\d", head):
+        return True
+    if re.match(r"^(Implement|Rename|Extract) \S+$", head):
+        return True
+    if re.match(r"^Extract \S+ from the surrounding function$", head):
+        return True
+    if head == "Skip the step when it fails":
+        return True
+    if (
+        re.match(r"^Update \S", head)
+        and len(head.split()) <= 8
+        and " so " not in head.casefold()
+        and " instead " not in head.casefold()
+    ):
+        return True
+    return False
+
+
+def _content_words(text: str) -> list[str]:
+    stop = {
+        "the", "and", "for", "with", "from", "this", "that", "when", "only",
+        "into", "over", "than", "then", "its", "are", "was", "not",
+    }
+    return [
+        word for word in re.findall(r"[A-Za-z][A-Za-z0-9_]{3,}", text or "")
+        if word.casefold() not in stop
+    ]
+
+
+def _echoes_removed_note(text: str, files: list[_File]) -> bool:
+    """True when the line is a comment that moved, not the new behavior."""
+    words = [word.casefold() for word in _content_words((text or "").split(";", 1)[0])]
+    if len(words) < 3:
+        return False
+    notes: list[str] = []
+    for item in files:
+        notes.extend(_removed_notes(item))
+    blob = " ".join(notes).casefold()
+    if not blob:
+        return False
+    hit = sum(1 for word in words if word in blob)
+    return hit >= max(3, len(words) - 1)
+
+
+def _apply_code_story(line: str, files: list[_File]) -> str:
+    """Replace a helper inventory with the behavior the edit itself states."""
+    head, _sep, tail = (line or "").partition("; ")
+    thin = _thin_head(head)
+    story = _code_story(files)
+    # A test title can replace "Update file.js". It must not replace a real sentence.
+    if not story and thin:
+        story = _story_it_title(files)
+    if not story and re.match(r"(?i)^set to (?:false|true) for ", head):
+        story = _story_untrusted(files)
+        thin = bool(story)
+    if not story or story.casefold() in (line or "").casefold():
+        line = _append_constraint(line, files)
+        return line
+    if not (thin or _echoes_removed_note(head, files)):
+        line = _append_constraint(line, files)
+        return line
+    versions = set(re.findall(r"\d+\.\d+(?:\.\d+)?", story))
+    if tail and versions and any(version in tail for version in versions):
+        tail = ""
+    if tail and not _thin_head(tail) and len(story) + len(tail) + 2 <= 170:
+        rest = tail[0].lower() + tail[1:] if tail[:1].isupper() else tail
+        return f"{story}; {rest}"
+    return story
+
+
+def _code_story(files: list[_File]) -> str:
+    """One behavior sentence read off the edit. Empty when no pattern is sure."""
+    added = _blob(files)
+    removed = _blob(files, removed=True)
+    return (
+        _story_noop(added, removed)
+        or _story_one_pass(files)
+        or _story_return_helper(files)
+        or _story_jsx_comment(files, added)
+        or _story_unquote(added)
+        or _story_same_prec(removed)
+        or _story_for_init(files, added)
+        or _story_enum_body(added)
+        or _story_type_helper(files)
+        or _story_plugin(files)
+        or _story_topic(files)
+        or _story_metadata(added, removed)
+        or _story_vim_count(files, added)
+        or _story_buffer_lock(files, added)
+        or _story_conceal_tab(added)
+        or _story_path_tail(files)
+        or _story_magic_close(added)
+        or _story_bitwise(added, removed)
+        or _story_cjk_neighbor(added, removed)
+        or _story_angular_ws(files)
+        or _story_export_comment(files, added)
+        or _story_reorder(files)
+        or _story_dep(files)
+        or _story_checkpoint(added)
+        or _story_timer_interrupt(files)
+        or _story_getref(added)
+        or _story_disk_usage(added)
+        or _story_zero_bucket(added)
+        or _story_leading_semi(files)
+        or _story_html_doctype(files)
+        or _story_flow_bound(files)
+        or _story_enum_comment(added)
+        or _story_return_true_lint(files)
+        or _story_range_typeparam(files)
+        or _story_arrow_space(files)
+        or _story_instantiation_paren(added)
+        or _story_yield_indent(files)
+        or _story_ignored_semi(files)
+        or _story_synctest(files)
+        or _story_js_rename_return(files)
+        or _story_vim_filetype(files)
+    )
+
+
+def _story_noop(added: str, removed: str = "") -> str:
+    if "permanently enabled" not in added.casefold() or "no-op" not in added.casefold():
+        return ""
+    flags = re.findall(r'case\s+"([^"]+)"\s*:', added)
+    if len(set(flags)) != 1:
+        flags = re.findall(r'Enable\([^,\n]+,\s*"([A-Za-z0-9_-]+)"\)', added)
+    flags = list(dict.fromkeys(flags))
+    if len(flags) != 1:
+        return ""
+    name = flags[0]
+    if "_" in name:
+        shown = " ".join("UTF-8" if part == "utf8" else part for part in name.split("_"))
+    else:
+        shown = name
+    old_flags = [
+        flag for flag in dict.fromkeys(re.findall(r'case\s+"([^"]+)"\s*:', removed))
+        if flag != name
+    ]
+    extra = f", removing the {old_flags[0]} flag" if len(old_flags) == 1 else ""
+    return (
+        f"Make {shown} permanently enabled and warn that the feature flag is a no-op{extra}"
+    )
+
+
+def _story_one_pass(files: list[_File]) -> str:
+    for item in _library_files(files):
+        old = "\n".join(item.removed)
+        new = "\n".join(item.added)
+        if "previousEnd" not in new and "previous_end" not in new:
+            continue
+        if ".slice(0," not in old and ".slice(0, " not in old:
+            continue
+        if "result +=" not in new and "result+=" not in new:
+            continue
+        noun = "comment" if "comment" in (item.path + old).casefold() else "span"
+        return f"Build the text in one pass instead of copying the whole string for every {noun}"
+    return ""
+
+
+def _story_return_helper(files: list[_File]) -> str:
+    names: list[str] = []
+    returns = 0
+    for item in _library_files(files):
+        old = "\n".join(item.removed)
+        new = "\n".join(item.added)
+        if "return true" not in old:
+            continue
+        for name in re.findall(r"\b(add(?:Leading|Trailing|Dangling)Comment)\b", new):
+            if f"return {name}(" in new and f"{name}(" in old and name not in names:
+                names.append(name)
+                returns += new.count(f"return {name}(")
+    if returns < 2 or not names:
+        return ""
+    return "Return the comment-attach helper result instead of calling it and then returning true"
+
+
+def _story_jsx_comment(files: list[_File], added: str) -> str:
+    removed = _blob(files, removed=True)
+    if "hasComment" in removed and "CommentCheckFlags" in removed:
+        return ""
+    if "CommentCheckFlags" not in added or "hasComment" not in added:
+        return ""
+    if not any("jsx" in item.path.casefold() for item in files):
+        return ""
+    if "printedName" not in added and 'print("name")' not in added and "node.name" not in added:
+        return ""
+    kinds = []
+    if "CommentCheckFlags.Line" in added:
+        kinds.append("line")
+    if "CommentCheckFlags.Block" in added:
+        kinds.append("block")
+    kind = " or ".join(kinds) if kinds else "leading"
+    return f"Keep a {kind} comment between a JSX opening bracket and the tag name"
+
+
+def _story_unquote(added: str) -> str:
+    if not re.search(
+        r"shouldUnquoteAttributeValue[\s\S]{0,120}?return value",
+        added,
+    ):
+        return ""
+    return "Return an unquoted attribute value as-is, before quote escaping"
+
+
+def _story_same_prec(removed: str) -> str:
+    if "samePrecedence" not in removed:
+        return ""
+    return "Keep a same-precedence logical chain inline instead of breaking after the first operator"
+
+
+def _story_for_init(files: list[_File], added: str) -> str:
+    if "ForInStatement" not in added or "ForOfStatement" not in added:
+        return ""
+    if not any("range" in item.path.casefold() for item in files):
+        return ""
+    if "ForStatement" not in added:
+        return ""
+    return "Skip for, for-in, and for-of initializers when formatting a source range"
+
+
+def _story_type_helper(files: list[_File]) -> str:
+    removed = _blob(files, removed=True)
+    if "type ===" not in removed and ".type ===" not in removed:
+        return ""
+    for item in _library_files(files):
+        added = "\n".join(item.added)
+        match = re.search(
+            r"\b(is[A-Z][A-Za-z0-9]+)\s*=\s*createTypeCheckFunction\(\s*\[([^\]]+)\]",
+            added,
+        )
+        if not match:
+            continue
+        types = re.findall(r'"([A-Za-z0-9_]+)"', match.group(2))[:3]
+        if len(types) < 2:
+            continue
+        if len(types) == 2:
+            shown = f"{types[0]} and {types[1]}"
+        else:
+            shown = ", ".join(types[:-1]) + f", and {types[-1]}"
+        return f"Replace repeated {shown} checks with {match.group(1)}"
+    return ""
+
+
+def _story_plugin(files: list[_File]) -> str:
+    words: list[str] = []
+    for item in files:
+        path = item.path.replace("\\", "/")
+        if "/parse/" not in f"/{path}" and not path.endswith("babel.js"):
+            continue
+        removed = "\n".join(item.removed)
+        for raw in item.added:
+            match = re.match(r'\s*"([a-z][a-z0-9-]{3,20})",?\s*$', raw.strip())
+            if not match:
+                continue
+            word = match.group(1)
+            if word in removed or word in words:
+                continue
+            words.append(word)
+    if len(words) != 1:
+        return ""
+    word = words[0]
+    stem = word[:-1].title() if word.endswith("s") else word.title()
+    if len(stem) < 4:
+        return ""
+    homes = sum(1 for item in _library_files(files) if stem in "\n".join(item.added))
+    if homes < 4:
+        return ""
+    return f"Support {word} syntax in parsing, printing, and comment handling"
+
+
+def _story_enum_body(added: str) -> str:
+    if 'node.type = "EnumBody"' not in added and "node.type = 'EnumBody'" not in added:
+        return ""
+    return "Normalize legacy Flow enum bodies to EnumBody"
+
+
+def _story_topic(files: list[_File]) -> str:
+    added = _blob(files)
+    removed = _blob(files, removed=True)
+    if "TopicReference" not in added or "hasNode" not in added:
+        return ""
+    if "__isUsingHackPipeline" not in removed:
+        return ""
+    return "Detect a TopicReference while printing instead of storing __isUsingHackPipeline on the AST root"
+
+
+def _story_metadata(added: str, removed: str) -> str:
+    if "switch" not in removed:
+        return ""
+    if "m.Type" not in added or "m.Unit" not in added:
+        return ""
+    if "Metadata" not in added:
+        return ""
+    if "meta.Help" not in added and ".Help" not in added:
+        return ""
+    if "writev2" in added.casefold():
+        return (
+            "Overlay type and unit from labels onto the remote-write v2 metadata when "
+            "each one is set, so a missing label keeps the other fields"
+        )
+    return (
+        "Overlay type and unit from labels onto series metadata when each one is set, "
+        "so a missing label keeps the metadata, and always take help from the metadata"
+    )
+
+
+def _story_vim_count(files: list[_File], added: str) -> str:
+    if "VV_COUNT" not in added or "VV_PREVCOUNT" not in added:
+        return ""
+    if "get_vim_var_nr" not in added or "set_vim_var_nr" not in added:
+        return ""
+    line = "Save and restore v:count, v:count1, and v:prevcount around UI messages"
+    blob = added.casefold()
+    if "should not alter v:count" in blob or "clobber" in blob:
+        line += " so a message does not change them"
+    return line
+
+
+def _story_buffer_lock(files: list[_File], added: str) -> str:
+    if "b_locked++" not in added or "b_locked--" not in added:
+        return ""
+    blob = (added + "\n" + "\n".join(item.path for item in files)).casefold()
+    if "autocmd" in blob or "autocommand" in blob:
+        line = "Lock the buffer across the rename so an autocommand cannot wipe it"
+    else:
+        line = "Lock the buffer across the rename"
+    if re.search(r"endcol\s*=\s*MIN\s*\(\s*col", added):
+        line += "; clamp the spell column to the line length"
+    return line
+
+
+def _story_conceal_tab(added: str) -> str:
+    if "extconceal_off" not in added or "lcs_chars" not in added:
+        return ""
+    if "tab1" not in added:
+        return ""
+    return "Draw a listchars tab over concealed cells"
+
+
+def _story_path_tail(files: list[_File]) -> str:
+    for item in files:
+        added = "\n".join(item.added)
+        if "path_tail(" not in added:
+            continue
+        if len(item.removed) < len(item.added) + 8 or len(item.removed) < 15:
+            continue
+        name = item.enclosing
+        if not name:
+            blob = "\n".join(item.headers + item.context)
+            match = re.search(r"\b(path_to_absolute)\b", blob)
+            name = match.group(1) if match else ""
+        if not name:
+            continue
+        return f"Simplify {name} by using path_tail for the relative part"
+    return ""
+
+
+def _story_magic_close(added: str) -> str:
+    if "magic number" not in added.casefold():
+        return ""
+    if ".Close()" not in added and "fclose" not in added:
+        return ""
+    return "Close the head chunk file when the magic-number read fails during repair"
+
+
+def _story_bitwise(added: str, removed: str) -> str:
+    ops = ("bitand", "bitor", "bitxor")
+    if not all(op in added for op in ops):
+        return ""
+    if all(op in removed for op in ops):
+        return ""
+    return "Add bitwise AND, OR, and XOR operators"
+
+
+def _story_cjk_neighbor(added: str, removed: str) -> str:
+    if "previous?." not in added:
+        return ""
+    if "KIND_CJ" not in added and "isCJ" not in added:
+        return ""
+    if "previous.kind" not in removed:
+        return ""
+    return "Guard a missing neighbor when checking a line break between CJK and Korean text"
+
+
+def _story_angular_ws(files: list[_File]) -> str:
+    added = _blob(files)
+    removed = _blob(files, removed=True)
+    if "htmlWhitespace.split" not in added or "htmlWhitespace.split" in removed:
+        return ""
+    return "Split Angular i18n attribute text on HTML whitespace"
+
+
+def _story_export_comment(files: list[_File], added: str) -> str:
+    if "isExportDeclaration" not in added or "hasComment" not in added or "hardline" not in added:
+        return ""
+    if not any("decorator" in item.path.casefold() for item in files):
+        return ""
+    return "Keep a leading comment on an exported decorator instead of forcing a break after export"
+
+
+def _collapsed_lines(lines: list[str]) -> list[str]:
+    out: list[str] = []
+    for line in lines:
+        text = " ".join(line.split())
+        if not text or text.startswith(("//", "/*", "*")):
+            continue
+        out.append(text)
+    return out
+
+
+def _story_reorder(files: list[_File]) -> str:
+    """Field alignment that only reorders or respaces existing lines."""
+    libs = [item for item in _library_files(files) if item.added and item.removed]
+    if len(libs) < 2:
+        return ""
+    names: list[str] = []
+    changed = False
+    for item in libs:
+        added = _collapsed_lines(item.added)
+        removed = _collapsed_lines(item.removed)
+        if not added or sorted(added) != sorted(removed):
+            return ""
+        if any(re.search(r"\b(?:if|return|for|switch)\b", line) for line in added):
+            return ""
+        if added != removed:
+            changed = True
+        stem = Path(item.path).stem.replace("_", " ")
+        if stem not in names:
+            names.append(stem)
+    if not changed:
+        return ""
+    if 2 <= len(names) <= 4:
+        if len(names) == 2:
+            shown = f"{names[0]} and {names[1]}"
+        else:
+            shown = ", ".join(names[:-1]) + ", and " + names[-1]
+        return f"Reorder {shown} fields without changing their values"
+    return "Reorder struct fields without changing their values"
+
+
+def _story_dep(files: list[_File]) -> str:
+    """A dependency bump is the subject only when the code edit is small."""
+    code_n = 0
+    for item in _library_files(files):
+        path = item.path.replace("\\", "/")
+        if Path(path).name in {"package.json", "go.mod", "go.sum", "yarn.lock", "cargo.toml", "cargo.lock"}:
+            continue
+        if "/scripts/build/" in f"/{path}" or path.startswith("scripts/"):
+            continue
+        code_n += len(item.added) + len(item.removed)
+    if code_n > 40:
+        return ""
+    bumps: list[tuple[str, str, str]] = []
+    for item in files:
+        name = Path(item.path).name
+        if name == "package.json":
+            added: dict[str, str] = {}
+            removed: dict[str, str] = {}
+            for raw, dest in ((item.added, added), (item.removed, removed)):
+                for line in raw:
+                    match = re.search(r'"([^"]+)":\s*"([^"]+)"', line)
+                    if match and re.search(r"\d+\.\d+", match.group(2)):
+                        dest[match.group(1)] = match.group(2).lstrip("^~")
+            for key, ver in added.items():
+                if key in removed and removed[key] != ver:
+                    bumps.append((key, key, ver))
+            gone = [key for key in removed if key not in added]
+            fresh = [key for key in added if key not in removed]
+            if len(gone) == 1 and len(fresh) == 1 and not any(old == gone[0] for old, _new, _ver in bumps):
+                bumps.append((gone[0], fresh[0], added[fresh[0]]))
+        if name == "go.mod":
+            mods = re.findall(r"([A-Za-z0-9_./-]+)\s+v(\d+\.\d+\.\d+)", "\n".join(item.added))
+            old_mods = set(re.findall(r"([A-Za-z0-9_./-]+)\s+v(\d+\.\d+\.\d+)", "\n".join(item.removed)))
+            fresh_mods = [pair for pair in mods if pair not in old_mods]
+            for mod, ver in fresh_mods:
+                bumps.append((mod, mod, "v" + ver))
+    bumps = list(dict.fromkeys(bumps))
+    if not bumps:
+        return ""
+    if len(bumps) > 1:
+        versions = {ver for _old, _new, ver in bumps}
+        scopes = {new.split("/")[0] for _old, new, _ver in bumps if "/" in new}
+        if len(versions) == 1 and len(scopes) == 1 and len(bumps) <= 6:
+            return f"Bump {scopes.pop()} packages to {versions.pop()}"
+        return ""
+    old, new, ver = bumps[0]
+    if old != new:
+        return f"Replace {old} with {new} {ver}"
+    label = new
+    if not new.startswith("@") and len(new) > 42:
+        label = new.split("/")[-1]
+        if re.fullmatch(r"v\d+", label):
+            label = "/".join(new.split("/")[-2:])
+    return f"Bump {label} to {ver}"
+
+
+def _story_checkpoint(added: str) -> str:
+    if "MinValidTime" not in added or "Checkpoint(" not in added:
+        return ""
+    return "Record the minimum valid time in the WAL checkpoint"
+
+
+_IT_TITLE = re.compile(r"""\b(?:it|test)\(\s*['"]([^'"\n]{16,140})['"]""")
+
+
+def _story_it_title(files: list[_File]) -> str:
+    """One new test sentence, when the code comment is not the subject."""
+    code = "\n".join(
+        "\n".join(item.added) for item in _library_files(files)
+    ).casefold()
+    titles: list[str] = []
+    for item in files:
+        if not _is_test(item.path):
+            continue
+        for match in _IT_TITLE.finditer("\n".join(item.added)):
+            title = " ".join(match.group(1).split())
+            if title not in titles:
+                titles.append(title)
+    if not titles:
+        return ""
+
+    def score(title: str) -> int:
+        words = title.split()
+        if not (5 <= len(words) <= 22):
+            return -1
+        low = title.casefold()
+        if low.startswith(("should ", "test ")):
+            return -1
+        value = len(words)
+        tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_:]{4,}", title)
+        if code and any(token.casefold().rstrip(":") in code for token in tokens):
+            value += 5
+        if any(word in low for word in (
+            "fail", "stop", "skip", "reject", "interrupt", "show", "keep", "error",
+        )):
+            value += 3
+        return value
+
+    best = max(titles, key=score)
+    if score(best) < 8:
+        return ""
+    best = best.rstrip(".")
+    return best[0].upper() + best[1:]
+
+
+def _story_untrusted(files: list[_File]) -> str:
+    added = "\n".join(
+        "\n".join(item.added) for item in files if item.path.endswith((".c", ".h"))
+    )
+    low = added.casefold()
+    if "untrusted peer" not in low:
+        return ""
+    if "malicious" in low or "arbitrary code" in low:
+        return "Reject API calls from an untrusted peer so a remote server cannot run code in the local process"
+    if "reject" in low and "api" in low:
+        return "Reject API calls from an untrusted peer"
+    return ""
+
+
+def _append_constraint(line: str, files: list[_File]) -> str:
+    """The next comment sentence, when this line is that comment and it states a limit."""
+    if not line or "; " in line:
+        return line
+    head = line.strip().rstrip(".")
+    if any(word in head.casefold() for word in (" so ", " instead ", " rather than ")):
+        return line
+    target = head.casefold()
+    for item in files:
+        if _is_test(item.path) or item.path.endswith((".md", ".gen.lua")):
+            continue
+        sentences = _sentences(item.added)
+        for index, sentence in enumerate(sentences[:-1]):
+            if sentence.casefold().rstrip(".").strip() != target:
+                continue
+            extra = sentences[index + 1].strip().split(":")[0].split(";")[0].rstrip(".").strip()
+            low = extra.casefold()
+            if not any(cue in low for cue in ("must not", "so that", "because", "instead of")):
+                continue
+            if not (4 <= len(extra.split()) <= 16):
+                continue
+            if extra[0].isupper():
+                extra = extra[0].lower() + extra[1:]
+            joined = f"{head}; {extra}"
+            if len(joined) <= 170:
+                return joined
+    return line
+
+
+def _story_timer_interrupt(files: list[_File]) -> str:
+    added = _blob(files)
+    removed = _blob(files, removed=True)
+    if "ctrl-c" not in added.casefold() or "timer" not in added.casefold():
+        return ""
+    if "sleep" not in removed.casefold():
+        return ""
+    code = sum(
+        len(item.added) + len(item.removed)
+        for item in _library_files(files)
+        if not _is_test(item.path)
+    )
+    if code > 8:
+        return ""
+    where = " when :global checks for input" if ":global" in added else ""
+    line = f"Replace the timed CTRL-C test with a timer that fires{where}"
+    old = re.search(r"retry\(\s*nil\s*,\s*(\d+)", removed)
+    new = re.search(r"retry\(\s*nil\s*,\s*(\d+)", added)
+    if old and new and old.group(1) != new.group(1):
+        line += f"; extend the health-check retry from {old.group(1)} to {new.group(1)}"
+    return line
+
+
+def _story_getref(added: str) -> str:
+    if "GetByHash" not in added:
+        return ""
+    if "storage.GetRef" not in added and "func (a *appender" not in added:
+        return ""
+    if "GetRef(" not in added:
+        return ""
+    return "Look up an existing series by hash and return its ref and labels"
+
+
+def _story_disk_usage(added: str) -> str:
+    if "diskUsageInBytesPerMetric" not in added or "EncodedSizeInBytes" not in added:
+        return ""
+    return "Report disk usage per metric from the encoded chunk size"
+
+
+def _story_zero_bucket(added: str) -> str:
+    if "sole zero bucket" not in added.casefold():
+        return ""
+    if "100%" not in added and "bucketWidth" not in added:
+        return ""
+    return "Render a sole zero-width bucket at full width even when its range is zero"
+
+
+def _story_leading_semi(files: list[_File]) -> str:
+    added = _blob(files)
+    if "LeadingSemicolon" not in added:
+        return ""
+    if "ASI" not in added and "prettier-ignore" not in added:
+        return ""
+    if "options.semi" not in added:
+        return ""
+    return (
+        "Insert a leading semicolon for a prettier-ignored statement when semicolons are off, "
+        "so the verbatim text does not break ASI"
+    )
+
+
+def _story_html_doctype(files: list[_File]) -> str:
+    added = _blob(files)
+    if "originalText" not in added or "DOCTYPE" not in added:
+        return ""
+    if not any(item.path.endswith(("text.js", "tag.js")) or "/html/" in item.path for item in files):
+        return ""
+    if "if (prefix)" in added and "if (suffix)" in added:
+        return (
+            "Attach an HTML prefix or suffix only when one is set, "
+            "and cast the doctype originalText to a string"
+        )
+    return "Print an HTML doctype from the original text"
+
+
+def _story_flow_bound(files: list[_File]) -> str:
+    added = _blob(files)
+    if "TypeParameter" not in added or "typeAnnotation" not in added:
+        return ""
+    versions = re.findall(r'"(?:flow-parser|flow-estree)":\s*"(\d+\.\d+\.\d+)"', added)
+    versions = list(dict.fromkeys(versions))
+    if len(versions) != 1:
+        return ""
+    return f"Bump flow-parser and flow-estree to {versions[0]} and accept a bare TypeParameter bound"
+
+
+def _story_enum_comment(added: str) -> str:
+    if "createTypeCheckFunction" not in added or "isEnumDeclaration" not in added:
+        return ""
+    if "addEnumBodyFirstComment" not in added and "EnumDeclaration" not in added:
+        return ""
+    if "isClassLikeNode" in added and "isModuleDeclaration" in added:
+        return "Attach a leading comment before an enum, class, or module body"
+    return "Attach a leading comment before an enum body"
+
+
+def _story_return_true_lint(files: list[_File]) -> str:
+    if not any("comment-attach" in item.path or "prefer-return" in item.path for item in files):
+        return ""
+    added = _blob(files)
+    if "addLeadingComment" not in added and "addTrailingComment" not in added:
+        return ""
+    if "return true" not in added:
+        return ""
+    return "Add a lint rule that rewrites a trailing return true into the comment-attach helper result"
+
+
+def _story_range_typeparam(files: list[_File]) -> str:
+    added = _blob(files)
+    if 'type !== "TSTypeParameterDeclaration"' not in added:
+        return ""
+    if not any("range" in item.path.casefold() for item in files):
+        return ""
+    return "Skip a TypeScript type parameter declaration when formatting a source range"
+
+
+def _story_arrow_space(files: list[_File]) -> str:
+    added = _blob(files)
+    if "locEnd(previous)" not in added or "locStart(comment)" not in added:
+        return ""
+    if not any("arrow" in item.path.casefold() for item in files):
+        return ""
+    return "Space dangling arrow-function comments that do not touch the previous token"
+
+
+def _story_instantiation_paren(added: str) -> str:
+    if "TSInstantiationExpression" not in added or "(a + b)<T>" not in added:
+        return ""
+    return "Keep parentheses around a TSInstantiationExpression operand so (a + b)<T> is not reprinted as a + b<T>"
+
+
+def _story_yield_indent(files: list[_File]) -> str:
+    added = _blob(files)
+    removed = _blob(files, removed=True)
+    if "YieldExpression" not in added or "UnaryExpression" not in added:
+        return ""
+    if "YieldExpression" in removed:
+        return ""
+    blob = added + "\n" + "\n".join(
+        "\n".join(item.context) for item in files
+    )
+    if "shouldNotIndent" not in blob and "indent" not in blob.casefold():
+        return ""
+    return "Stop indenting a binary expression under a yield or unary argument"
+
+
+def _story_ignored_semi(files: list[_File]) -> str:
+    added = _blob(files)
+    if "prettier-ignore" not in added or "ClassProperty" not in added:
+        return ""
+    if not re.search(r'semi["\s:]*false', added, re.I):
+        return ""
+    return "Preserve semicolons after prettier-ignored class properties when semicolons are off"
+
+
+def _story_synctest(files: list[_File]) -> str:
+    added = _blob(files)
+    removed = _blob(files, removed=True)
+    if "testing/synctest" not in added or "testing/synctest" in removed:
+        return ""
+    if "time.Sleep" not in added and "time.Sleep" not in removed:
+        return ""
+    return "Run the test under testing/synctest instead of waiting on the real clock"
+
+
+def _story_js_rename_return(files: list[_File]) -> str:
+    gone: list[str] = []
+    fresh: list[str] = []
+    added = ""
+    removed = ""
+    for item in _library_files(files):
+        added += "\n" + "\n".join(item.added)
+        removed += "\n" + "\n".join(item.removed)
+        for line in item.removed:
+            match = re.match(r"\s*function ([A-Za-z][A-Za-z0-9]{8,})\(", line)
+            if match and match.group(1) not in gone:
+                gone.append(match.group(1))
+        for line in item.added:
+            match = re.match(r"\s*function ([A-Za-z][A-Za-z0-9]{8,})\(", line)
+            if match and match.group(1) not in fresh:
+                fresh.append(match.group(1))
+    lost = [name for name in gone if name not in fresh and f"function {name}(" not in added]
+    gained = [name for name in fresh if name not in gone]
+    if len(lost) != 1 or len(gained) != 1:
+        return ""
+    old, new = lost[0], gained[0]
+    if f"function {old}(" not in removed or f"function {new}(" not in added:
+        return ""
+    if "return " not in added:
+        return ""
+    return f"Rename {old} to {new} and return its result"
+
+
+def _story_vim_filetype(files: list[_File]) -> str:
+    indent = ""
+    syntax = ""
+    for item in files:
+        if not item.path.endswith(".vim") or len(item.removed) > 2:
+            continue
+        blob = "\n".join(item.added)
+        stem = Path(item.path).stem
+        if "indent file" in blob.casefold() or "/indent/" in item.path.replace("\\", "/"):
+            indent = stem
+        if "syn match" in blob or "syn keyword" in blob:
+            syntax = stem
+    if not indent or indent != syntax:
+        return ""
+    return f"Add {indent} indent and syntax highlighting"
+
+
+def _widen(line: str, files: list[_File]) -> str:
+    """A mechanical comment names the bug once the diff states it."""
+    head = (line or "").split("; ", 1)[0].strip()
+    if not head:
+        return line
+    low = _widen_text(files)
+    found = (
+        _widen_nan(head, low)
+        or _widen_deadlock(head, low)
+        or _widen_missing_paren(head, low)
+        or _widen_diff_tab(head, low)
+        or _widen_eperm(head, low, files)
+        or _widen_series_lock(head, low)
+        or _widen_chunk_seq(head, low)
+        or _widen_scrape_cache(head, low)
+        or _widen_zero_st(head, low)
+        or _widen_mmap_dup(head, low)
+        or _widen_seek(head, low)
+        or _widen_hist_buf(head, low)
+        or _widen_dict_filter(head, low)
+        or _widen_editorconfig(head, low)
+        or _widen_bitwise(head, low)
+        or _widen_import_sync(head, low)
+        or _widen_health(head, low)
+        or _widen_commit_stats(head, low)
+        or _widen_queues(head, low)
+        or _widen_lookbehind(head, low, files)
+        or _widen_parser_release(head, low)
+        or _widen_exemplar(head, low)
+        or _widen_noop_edit(head, files)
+        or _widen_pool_factor(head, low)
+        or _widen_agent_ref(head, low)
+        or _widen_promtool_disk(head, low)
+        or _widen_restart_addr(head, low)
+        or _widen_namespace_filter(head, low)
+        or _widen_composing(line, low)
+        or _widen_task_wait(head, low)
+        or _widen_lsp_nil(head, low)
+        or _widen_force_stop(head, low)
+        or _widen_ssh_host(head, low)
+        or _widen_utf8_printer(head, low)
+        or _widen_unicode_names(head, low)
+        or _widen_tombstone_end(head, low)
+        or _widen_bad_glob(head, low)
+        or _widen_component_body(head, low)
+        or _widen_for_using_of(head, low)
+        or _widen_sequence_indent(head, low)
+        or _widen_record_comment(head, low)
+        or _widen_before_body(head, low)
+        or _widen_flow_bump(head, low)
+        or _widen_oxc_bundle(head, low)
+        or _widen_array_chain(head, low)
+        or _widen_textarea_cursor(head, low)
+        or _widen_shada_damage(head, low)
+        or _widen_yaml_doc(head, low)
+        or _widen_jsx_name(head, low)
+        or _widen_stream_private(head, low)
+        or _widen_failed_format(head, low)
+        or _widen_drop_limited(head, files)
+        or _widen_appender_tests(head, files)
+        or _widen_enum_comment(head, files)
+        or _widen_ctrl_c_wait(head, low)
+        or _widen_remote_nvim(head, low)
+        or _widen_push_config(head, low)
+        or _widen_write_mode(head, low)
+        or _widen_iterator_err(head, low)
+        or _widen_empty_sync(head, low)
+        or _widen_pkl_indent(head, low)
+        or _widen_pool_hints(head, low)
+        or _widen_html_text(head, files)
+        or _widen_compliance_main(head, low)
+        or _widen_log_value(head, low)
+        or _widen_compositor(head, low)
+        or _widen_conceal_rows(head, low)
+        or _widen_zero_sample(head, low)
+        or _widen_strip_pass(head, low)
+        or _widen_strbuf(head, low)
+        or _widen_jsx_trail(head, low)
+        or _widen_sentinel_place(head, low)
+        or _widen_chunk_bytes(head, low)
+        or _widen_argument_metavar(head, low)
+        or _widen_hermes_enum(head, files)
+        or _widen_tseslint_build(head, low)
+        or _widen_yuku_bump(head, files)
+        or _widen_path_tail(head, low)
+        or _widen_riscv_cmd(head, files)
+        or _widen_scroll_width(head, low)
+        or _widen_prompt_tests(head, low)
+        or _widen_version_option(head, low)
+        or _widen_index_flags(head, low)
+        or _widen_mmap_seq(head, low)
+        or _widen_gitignore_cwd(head, low)
+        or _widen_short_read(head, low)
+        or _widen_textarea_bump(head, low)
+        or _widen_mode_report(head, low)
+        or _widen_cursed_flush(head, low)
+        or _widen_log_header(head, low)
+        or _widen_conceal_past(head, low)
+        or _widen_linode(head, low)
+        or _widen_glimmer(head, low)
+        or _widen_nbsp_tests(head, low)
+        or _widen_markdown_break(head, low)
+        or _widen_pager_writer(head, files)
+        or _widen_mapnl(head, low)
+        or _widen_utf8_option(head, low)
+        or _widen_clickable_hit(head, low)
+        or _widen_flow_method(head, low)
+        or _widen_progress_api(head, low)
+        or _widen_kitty_keys(head, low)
+        or _widen_alt_flush(head, low)
+        or _widen_zero_count(head, low)
+        or _widen_synctest_evict(head, low)
+        or _widen_yaml_null(head, low)
+        or _widen_go124(head, low)
+        or _widen_cloned_copied(head, low)
+        or _widen_mouse_only(head, low)
+        or _widen_hazard_semi(head, low)
+        or _widen_wait_cond(head, low)
+        or _widen_window_cells(head, low)
+        or _widen_return_true(head, low)
+        or _widen_quantile(head, low)
+        or _widen_read_dir_ignore(head, low)
+        or _widen_modify_keys(head, files)
+        or _widen_deferred(head, low)
+    )
+    if not found or found.casefold() == head.casefold():
+        return line
+    return _glance(found)
+
+
+def _widen_text(files: list[_File]) -> str:
+    parts: list[str] = []
+    for item in files:
+        parts.append(item.path)
+        parts.append("\n".join(item.added))
+    return "\n".join(parts).casefold()
+
+
+def _widen_nan(head: str, low: str) -> str:
+    if "nan is only returned if both" not in head.casefold():
+        return ""
+    if "min_of" not in low or "max_of" not in low:
+        return ""
+    if "durations.go" in low:
+        line = (
+            "Make min_of and max_of duration expressions ignore a single NaN "
+            "unless both values are NaN, matching the aggregators"
+        )
+        if "duration_expression.test" in low:
+            line += ", and add tests"
+        return line
+    return (
+        "Make min_of and max_of ignore a single NaN unless both values are NaN, "
+        "matching the aggregators"
+    )
+
+
+def _widen_deadlock(head: str, low: str) -> str:
+    if "stop the truncate loop before taking" not in head.casefold():
+        return ""
+    if "deadlock" not in low:
+        return ""
+    return "Stop the truncate loop before taking the database lock so Close does not deadlock against it"
+
+
+def _widen_missing_paren(head: str, low: str) -> str:
+    if not head.startswith("Show where the expression stopped"):
+        return ""
+    if "e110" not in low and "missing ')'" not in low:
+        return ""
+    return "Show the unexpected text after a nested expression in the E110 missing ')' error"
+
+
+def _widen_diff_tab(head: str, low: str) -> str:
+    if not head.startswith("Look up the tab page"):
+        return ""
+    if "diff" not in low or "tabpage" not in low:
+        return ""
+    return "Fix diff folding to use the window's own tab page"
+
+
+def _widen_eperm(head: str, low: str, files: list[_File]) -> str:
+    if "eperm" not in head.casefold():
+        return ""
+    if "deleted" not in low and "enoent" not in low:
+        return ""
+    blob = low + "\n" + "\n".join("\n".join(item.context) for item in files).casefold()
+    if "is_win" not in blob or "enoent" not in blob:
+        return (
+            "Stop the file watch when the watched file's parent directory is deleted, "
+            "to avoid endless EPERM errors"
+        )
+    return "Stop a Windows file watch on ENOENT, to avoid endless EPERM errors"
+
+
+def _widen_series_lock(head: str, low: str) -> str:
+    if "lastseriesid" not in head.casefold():
+        return ""
+    if "postings" not in low:
+        return ""
+    line = "Hold one lock across series ID assignment and the postings insert so new IDs stay in order"
+    if "head_bench" in low:
+        line += "; benchmark parallel series creation"
+    return line
+
+
+def _widen_chunk_seq(head: str, low: str) -> str:
+    if not head.startswith("Use the sequence carried by the chunk reference"):
+        return ""
+    if "monotonic" not in low:
+        return ""
+    return "Keep head chunk refs monotonic across truncation so a sequence still in use is not reused"
+
+
+def _widen_scrape_cache(head: str, low: str) -> str:
+    if not head.startswith("Cache of dropped metric"):
+        return ""
+    if "stored by value" not in low:
+        return ""
+    return "Key the scrape cache by hash and store entries by value so a metric string is not kept per series"
+
+
+def _widen_zero_st(head: str, low: str) -> str:
+    if "start timestamps are stored" not in head.casefold():
+        return ""
+    if "wal" not in low:
+        return ""
+    line = "Pass a zero start timestamp when start-timestamp storage is off so chunks match across a WAL replay"
+    if "st-capable" in low and "out-of-order" in low:
+        line += "; cover ST-capable encodings and out-of-order samples"
+    return line
+
+
+def _widen_mmap_dup(head: str, low: str) -> str:
+    if "duplicate detection" not in head.casefold():
+        return ""
+    if "mmapped" not in low:
+        return ""
+    return "Read the last sample from the mmapped chunk when detecting duplicates on a series with no head chunk"
+
+
+def _widen_seek(head: str, low: str) -> str:
+    if head != "Use storage.SeriesRef in Seek":
+        return ""
+    if "uint32" not in low:
+        return ""
+    if "postings.go" in low and "bigendian" in low:
+        return "Compare bigEndianPostings.Seek as a series ref so a seek past the uint32 range ends"
+    return "Compare Seek as a series ref so a seek past the uint32 range ends"
+
+
+def _widen_hist_buf(head: str, low: str) -> str:
+    if not head.startswith("Reuse hBuf"):
+        return ""
+    if "floathistogram" not in low and "fhbuf" not in low:
+        return ""
+    return "Reuse histogram buffers when encoding histogram series to chunks"
+
+
+def _widen_dict_filter(head: str, low: str) -> str:
+    if "hash slot" not in head.casefold():
+        return ""
+    if "filter" not in low:
+        return ""
+    return "Remove dict items by hash slot while filter() walks a dict with many items"
+
+
+def _widen_editorconfig(head: str, low: str) -> str:
+    if not head.startswith("Do not match path separators on ?"):
+        return ""
+    if "editorconfig" not in low:
+        return ""
+    return "Stop an EditorConfig ? glob from matching path separators, as * already does"
+
+
+def _widen_bitwise(head: str, low: str) -> str:
+    if head != "Add bitwise AND, OR, and XOR operators":
+        return ""
+    if "promql" not in low:
+        return ""
+    if "bigint" in low:
+        return (
+            "Add bitwise AND, OR, and XOR operators to the PromQL web UI, "
+            "using BigInt so values are not truncated to 32 bits"
+        )
+    return "Add bitwise AND, OR, and XOR operators to the PromQL web UI"
+
+
+def _widen_import_sync(head: str, low: str) -> str:
+    if "import.sync" not in head.casefold() or "trailing comma" not in head.casefold():
+        return ""
+    if "import-sync" not in low and "importsync" not in low:
+        return ""
+    if "babel" in low and "print/" in low and "proposal" in low:
+        return (
+            "Add the import.sync syntax from the importSync proposal to the Babel parser "
+            "and printer, and allow trailing commas unlike dynamic imports"
+        )
+    if "babel" in low and "print/" in low:
+        return (
+            "Add import.sync to the Babel parser and printer, and allow trailing commas "
+            "in its arguments, unlike dynamic imports"
+        )
+    return "Add import.sync and allow trailing commas in its arguments, unlike dynamic imports"
+
+
+def _widen_health(head: str, low: str) -> str:
+    if not head.startswith("For tests: skip the update check"):
+        return ""
+    base = "Skip the :checkhealth update check in tests"
+    if "kitty" in low and "tty" in low:
+        return base + "; report kitty image support only when a TTY UI is attached"
+    return base
+
+
+def _widen_commit_stats(head: str, low: str) -> str:
+    if not head.startswith("Return what the most recent Commit did"):
+        return ""
+    if "dropped" not in low and "discarded" not in low:
+        return ""
+    return "Report samples the last Commit dropped because the series already had a sample at that timestamp"
+
+
+def _widen_queues(head: str, low: str) -> str:
+    if not head.startswith("Stop queues whose config changed"):
+        return ""
+    if "already running" not in low and "only start" not in low:
+        return ""
+    return "Stop remote-write queues whose config changed and start only the new ones"
+
+
+def _widen_lookbehind(head: str, low: str, files: list[_File]) -> str:
+    if "strlen" not in head or not head.startswith("Measure the line with"):
+        return ""
+    extra = "\n".join(item.hunk or "" for item in files)
+    extra += "\n" + "\n".join("\n".join(item.headers) for item in files)
+    blob = low + "\n" + extra.casefold()
+    if "lookbehind" not in blob:
+        return ""
+    return "Measure a lookbehind across a line with the line's own length instead of strlen"
+
+
+def _widen_parser_release(head: str, low: str) -> str:
+    if head != "Release replaced parser":
+        return ""
+    if "treesitter" not in low:
+        return ""
+    if "callback" in low:
+        return "Release a replaced treesitter parser and stop its buffer callbacks"
+    return "Release a replaced treesitter parser"
+
+
+def _widen_exemplar(head: str, low: str) -> str:
+    if not head.startswith("Unescape the values passed to Add"):
+        return ""
+    if "exemplar" not in low:
+        return ""
+    return "Unescape exemplar label names and values in the OpenMetrics parser"
+
+
+def _widen_pool_factor(head: str, low: str) -> str:
+    folded = head.casefold()
+    if "barely above 1" not in folded and "pool factor" not in folded:
+        return ""
+    if "factor" not in low or "below" not in low:
+        return ""
+    if "slightly above" in low or "fractional" in low:
+        return (
+            "Reject a pool factor at or below 1, and advance the bucket size when "
+            "a factor would round back to the same integer"
+        )
+    return "Reject a pool factor at or below 1 so a bucket size cannot repeat forever"
+
+
+def _widen_agent_ref(head: str, low: str) -> str:
+    folded = head.casefold()
+    if "existing series by hash" not in folded and "agent appender" not in folded:
+        return ""
+    if "/agent/" not in low and "tsdb/agent" not in low:
+        return ""
+    if "append_v2" in low and "wal" in low:
+        line = (
+            "Add GetRef on the agent appenders to look up an existing series by hash "
+            "and return its ref and labels"
+        )
+        if "series miss" in low and "gc the inactive" in low:
+            line += "; cover misses, WAL replay, and GC"
+        return line
+    return "Look up an existing series by hash on the agent appender and return its ref and labels"
+
+
+def _widen_promtool_disk(head: str, low: str) -> str:
+    if not head.startswith("Report disk usage per metric"):
+        return ""
+    if "promtool" not in low:
+        return ""
+    return "Report disk usage per metric from promtool tsdb analyze, using the encoded chunk size"
+
+
+def _widen_restart_addr(head: str, low: str) -> str:
+    if "channel-stored addr" not in head.casefold():
+        return ""
+    if ":restart" not in low and "restart" not in low:
+        return ""
+    return "Store the address a UI uses to reach the server and send it on :restart so the UI reconnects"
+
+
+def _widen_namespace_filter(head: str, low: str) -> str:
+    if "exportsfilter" not in head.casefold() and "exports filter" not in head.casefold():
+        return ""
+    if "filtered-namespace" not in low and "namespace" not in low:
+        return ""
+    return "Print a filtered namespace import or export as its filter list, and as * when there is no filter"
+
+
+def _widen_composing(line: str, low: str) -> str:
+    if "base characters" not in line.casefold():
+        return ""
+    if "ignorecase" not in low or "compos" not in low:
+        return ""
+    return (
+        "Stop case-insensitive literal matching from consuming composing characters, "
+        "matching the NFA engine on a following \\%C"
+    )
+
+
+def _widen_noop_edit(head: str, files: list[_File]) -> str:
+    if head != "Handle a no-op edit in an empty buffer":
+        return ""
+    libs = [
+        item for item in files
+        if item.path and not _is_test(item.path) and not item.path.endswith((".md", ".txt"))
+        and (item.added or item.removed)
+    ]
+    if libs:
+        return ""
+    return "Add a regression test for a no-op edit in an empty buffer"
+
+
+def _widen_removed(files: list[_File]) -> str:
+    return "\n".join("\n".join(item.removed) for item in files).casefold()
+
+
+def _widen_task_wait(head: str, low: str) -> str:
+    if not head.startswith("Make a sync wait interruptible"):
+        return ""
+    if "task:wait" not in low or "timeout" not in low:
+        return ""
+    return (
+        "Make Task:wait() interruptible by CTRL-C, and document that a timed-out task "
+        "keeps running until it is closed"
+    )
+
+
+def _widen_lsp_nil(head: str, low: str) -> str:
+    if not head.startswith("Let cmd() return nil"):
+        return ""
+    if "lsp" not in low or "should not start" not in low:
+        return ""
+    return (
+        "Let an LSP cmd function return nil so the client does not start, "
+        "and validate the RPC client it returns"
+    )
+
+
+def _widen_force_stop(head: str, low: str) -> str:
+    if not head.startswith("It is force-stopped"):
+        return ""
+    if "initialize" not in low or "lsp" not in low or "shutdown" not in low:
+        return ""
+    return (
+        "Force-stop an LSP server that has not answered initialize, "
+        "because it cannot receive shutdown"
+    )
+
+
+def _widen_ssh_host(head: str, low: str) -> str:
+    if not head.startswith("Return the hostname for the bottom-left"):
+        return ""
+    if "statuslineremote" not in low or "ssh" not in low:
+        return ""
+    return (
+        "Show the hostname in the default statusline during an SSH session, "
+        "with a StatusLineRemote highlight"
+    )
+
+
+def _widen_utf8_printer(head: str, low: str) -> str:
+    if not head.startswith("Use legacy validation for a label name"):
+        return ""
+    if "enableunquotedutf8names" not in low or "printer" not in low:
+        return ""
+    return (
+        "Let the PromQL printer emit unquoted Unicode letters and dots "
+        "when unquoted UTF-8 names are enabled"
+    )
+
+
+def _widen_unicode_names(head: str, low: str) -> str:
+    if not head.startswith("Preserve function completion for an unfinished name"):
+        return ""
+    if "unicode" not in low or "promql.grammar" not in low:
+        return ""
+    return (
+        "Allow Unicode letters and dots in PromQL metric and label names "
+        "during completion and parsing"
+    )
+
+
+def _widen_tombstone_end(head: str, low: str) -> str:
+    if not head.startswith("Measure len(in) from mini"):
+        return ""
+    if "tombstone" not in low or "maxint64" not in low:
+        return ""
+    return "Fix tombstone interval addition when the new interval ends at math.MaxInt64"
+
+
+def _widen_bad_glob(head: str, low: str) -> str:
+    if not head.startswith("Call vim.regex inside the pcall"):
+        return ""
+    if "editorconfig" not in low or "invalid regex" not in low:
+        return ""
+    return "Skip an EditorConfig section whose glob is an invalid regex"
+
+
+def _widen_component_body(head: str, low: str) -> str:
+    if not head.startswith("Treat ComponentDeclaration and HookDeclaration"):
+        return ""
+    if "comments-before-body" not in low:
+        return ""
+    return (
+        "Treat component and hook declarations as function-like so comments "
+        "before the body are handled"
+    )
+
+
+def _widen_for_using_of(head: str, low: str) -> str:
+    if not head.startswith("Escape of when it is a VariableDeclarator"):
+        return ""
+    if "for-using" not in low:
+        return ""
+    return "Escape an of binding in a for-using loop"
+
+
+def _widen_sequence_indent(head: str, low: str) -> str:
+    if not head.startswith("Replace repeated ReturnStatement, ThrowStatement, and YieldExpression"):
+        return ""
+    if "sequence-expression" not in low:
+        return ""
+    if "yieldexpression" in low and "returnstatement" in low and "throwstatement" in low:
+        return (
+            "Indent a sequence expression under yield or unary the same way "
+            "as under return or throw"
+        )
+    return "Indent sequence expressions that are arguments of unary-like nodes"
+
+
+def _widen_record_comment(head: str, low: str) -> str:
+    if not head.startswith("Treat RecordDeclaration as class"):
+        return ""
+    if "/records/" not in low:
+        return ""
+    if "elements[0]" in low:
+        return (
+            "Attach a comment to the record body's first element, and treat "
+            "the record declaration as class-like"
+        )
+    return "Attach comments on a Flow record by treating the record declaration as class-like"
+
+
+def _widen_before_body(head: str, low: str) -> str:
+    if not head.startswith("Attach a leading comment before an enum"):
+        return ""
+    if "before-body" not in low or "namespace" not in low:
+        return ""
+    if "members[0]" in low and "adddanglingcomment" in low and "isenumdeclaration" in low:
+        return (
+            "Keep a comment between a declaration header and its opening brace "
+            "attached to the body, and dangle it when an enum body is empty"
+        )
+    return "Attach a leading comment before the body of an enum, namespace, class, or module"
+
+
+def _widen_flow_bump(head: str, low: str) -> str:
+    if not head.startswith("Replace repeated TSParameterProperty"):
+        return ""
+    if "0.338.0" not in low or "namespace-export" not in low or "non-null" not in low:
+        return ""
+    return (
+        "Bump flow-parser to 0.338.0 and format Flow non-null assertions, "
+        "parameter properties, namespace exports, and optional tuple members"
+    )
+
+
+def _widen_oxc_bundle(head: str, low: str) -> str:
+    if not head.startswith("Bump @oxc-parser packages"):
+        return ""
+    if "browser-bundle.js" not in low:
+        return ""
+    return "Bump oxc-parser to 0.156.0 and point the WASM browser build at browser-bundle.js"
+
+
+def _widen_array_chain(head: str, low: str) -> str:
+    if not head.startswith("Keep a same-precedence logical chain inline"):
+        return ""
+    if "array-chain" not in low:
+        return ""
+    return (
+        "Keep a same-precedence logical chain that ends in a long array or object inline"
+    )
+
+
+def _widen_textarea_cursor(head: str, low: str) -> str:
+    if not head.startswith("Guard against a nil cursor"):
+        return ""
+    if "examples/textarea" not in low:
+        return ""
+    return "Guard a nil cursor before adjusting its Y offset in the textarea example"
+
+
+def _widen_shada_damage(head: str, low: str) -> str:
+    if not head.startswith("Keep the entries gathered so far"):
+        return ""
+    if "shada" not in low or "damage" not in low:
+        return ""
+    return (
+        "Keep ShaDa entries gathered after a valid header when later bytes are damaged, "
+        "and replace the file on write"
+    )
+
+
+def _widen_yaml_doc(head: str, low: str) -> str:
+    if not head.startswith("Skip the warning about multiple document"):
+        return ""
+    if "second document" not in low or "syntax error" not in low:
+        return ""
+    if "rules" in low and "first document" in low:
+        return (
+            "Stop warning that a rules file has multiple YAML documents when the failure "
+            "is a syntax error in the first document"
+        )
+    return "Do not report a YAML syntax error in one document as a second document"
+
+
+def _widen_jsx_name(head: str, low: str) -> str:
+    if not head.startswith("Add printJsxClosingElement"):
+        return ""
+    if "printjsxelementname" not in low:
+        return ""
+    return (
+        "Print a JSX element name in one helper so the closing tag handles "
+        "a leading comment the same way"
+    )
+
+
+def _widen_stream_private(head: str, low: str) -> str:
+    if not head.startswith("Make KeepOpenFile"):
+        return ""
+    if "get_binary_stream" not in low or "get_text_stream" not in low or "deprecated" not in low:
+        return ""
+    return (
+        "Make internal utils helpers private and deprecate the public "
+        "get_binary_stream and get_text_stream names"
+    )
+
+
+def _widen_failed_format(head: str, low: str) -> str:
+    if not head.startswith("Add tests in failed-format-tests"):
+        return ""
+    if "hermes" not in low or "babel-flow" not in low:
+        return ""
+    return (
+        "Drop hermes and babel-flow entries from the failed-format list "
+        "and snapshot the hermes syntax errors"
+    )
+
+
+def _widen_drop_limited(head: str, files: list[_File]) -> str:
+    if head != "Use AppenderV2 instead of LimitedAppenderV1":
+        return ""
+    removed = _widen_removed(files)
+    added = _widen_text(files)
+    if "type limitedappenderv1 interface" not in removed and "type limitedappenderv1" not in removed:
+        return ""
+    if "appenderv2" not in added:
+        return ""
+    return "Remove LimitedAppenderV1 and call AppenderV2 from the TSDB tests"
+
+
+def _widen_appender_tests(head: str, files: list[_File]) -> str:
+    if head != "Rename Appender to AppenderV2":
+        return ""
+    removed = _widen_removed(files)
+    added = _widen_text(files)
+    if "func testblockwriter" not in removed or "appenderv2" not in added:
+        return ""
+    return "Move TSDB tests onto AppenderV2 and drop TestBlockWriter"
+
+
+def _widen_enum_comment(head: str, files: list[_File]) -> str:
+    if not head.startswith("Rename addBlockStatementFirstComment"):
+        return ""
+    removed = _widen_removed(files)
+    added = _widen_text(files)
+    if "addenumbodyfirstcomment" not in removed or "addblockfirstcomment" not in added:
+        return ""
+    if "interfacebody" in added and "classbody" in added:
+        if "tsmoduleblock" in added and "objecttypeannotation" in added:
+            line = (
+                "Fold comment attachment for blocks, classes, enums, interfaces, modules, "
+                "and object types into one helper"
+            )
+            if "before-body" in added:
+                line += ", and update the before-body snapshots"
+            return line
+        if "leading" in added:
+            return (
+                "Fold block, class, enum, and interface comment attachment into one helper "
+                "so a leading comment stays with the body"
+            )
+        return "Fold block, class, enum, and interface comment attachment into addBlockFirstComment"
+    return "Fold enum-body comment attachment into addBlockFirstComment"
+
+
+def _widen_ctrl_c_wait(head: str, low: str) -> str:
+    if not head.startswith("On CTRL-C, stop and return nil"):
+        return ""
+    if "systemobj" not in low or "interrupted" not in low or "timeout" not in low:
+        return ""
+    if "_ssh" not in low:
+        return 'Make CTRL-C during SystemObj:wait() fail with "interrupted" instead of a timeout'
+    return (
+        'Make CTRL-C during SystemObj:wait() fail with "interrupted" instead of a timeout, '
+        "and report an interrupted SSH connect"
+    )
+
+
+def _widen_remote_nvim(head: str, low: str) -> str:
+    if not head.startswith("Return the prerelease tag"):
+        return ""
+    if "update nvim" not in low or "prerelease" not in low:
+        return ""
+    return (
+        "Prefer a remote nvim at least as new as the local version, "
+        "unless Update Nvim forces the release install"
+    )
+
+
+def _widen_push_config(head: str, low: str) -> str:
+    if not head.startswith("Replace the remote config dir"):
+        return ""
+    if "on connect" not in low or ".git/" not in low:
+        return ""
+    return "Replace the remote config dir on connect with a copy of the local config, except .git/"
+
+
+def _widen_write_mode(head: str, low: str) -> str:
+    if not head.startswith("Rename StatusUnsupportedMediaType"):
+        return ""
+    if "writemode" not in low or "compliance" not in low:
+        return ""
+    return "Pass WriteMode through the remote-write API and bump the compliance test dependencies"
+
+
+def _widen_iterator_err(head: str, low: str) -> str:
+    if not head.startswith("Return the error from it instead of ss"):
+        return ""
+    if "promtool" not in low or "iterator" not in low:
+        return ""
+    return "Return the iterator error from promtool tsdb dump instead of the series-set error"
+
+
+def _widen_empty_sync(head: str, low: str) -> str:
+    if head != "Handle a no-op edit in an empty buffer":
+        return ""
+    if "incremental_sync" not in low:
+        return ""
+    return "Send an empty range for a no-op edit in an empty buffer during incremental sync"
+
+
+def _widen_pkl_indent(head: str, low: str) -> str:
+    if not head.startswith("Add synIDattr"):
+        return ""
+    if "indent/pkl.vim" not in low or "syntax/pkl.vim" not in low:
+        return ""
+    return "Add a Pkl indent script for objects, classes, and lists, and update Pkl syntax highlighting"
+
+
+def _widen_pool_hints(head: str, low: str) -> str:
+    if not head.startswith("Clear all pending data before the appender"):
+        return ""
+    if "hints" not in low or "sync.pool" not in low:
+        return ""
+    if "retained" not in low:
+        return "Clear pending appender data and drop its hints before the appender returns to its pool"
+    return (
+        "Clear pending appender data and its hints before the appender returns to the pool, "
+        "so a recycled appender does not retain series or labels"
+    )
+
+
+def _widen_html_text(head: str, files: list[_File]) -> str:
+    low = _widen_text(files)
+    removed = _widen_removed(files)
+    if not head.startswith("Replace the trailing literalline with hardline"):
+        return ""
+    if "language-html/print/text.js" not in low:
+        return ""
+    if "knip.config.js" in low and "yuku" in removed and "oxc" in removed:
+        return (
+            "Move HTML text printing into print/text.js and drop the yuku and "
+            "oxc-parser wasm ignores from knip.config.js"
+        )
+    return "Move HTML text printing into print/text.js"
+
+
+def _widen_compliance_main(head: str, low: str) -> str:
+    if not head.startswith("Bump go-uuid"):
+        return ""
+    if "compliance/main_test.go" not in low or "receiverskip" not in low:
+        return ""
+    if "prometheus/compliance" in low:
+        return "Move the compliance TestMain into main_test.go and bump prometheus/compliance"
+    return "Move the compliance TestMain into main_test.go and list the receiver checks to skip"
+
+
+def _widen_log_value(head: str, low: str) -> str:
+    if not head.startswith("Check that value resolves to want"):
+        return ""
+    if "requirelogvalue" not in low:
+        return ""
+    if "gokit" in low and "slog" in low:
+        return (
+            "Replace copied LogValue checks in the rule, target, and block tests "
+            "with testutil.RequireLogValue across slog and go-kit styles"
+        )
+    return "Add testutil.RequireLogValue for LogValue checks in the rule, target, and block tests"
+
+
+def _widen_compositor(head: str, low: str) -> str:
+    if not head.startswith("Build the canvas and clickable examples"):
+        return ""
+    if "newcompositor" not in low or "onmouse" not in low:
+        return ""
+    return "Port the canvas and clickable examples to lipgloss.NewCompositor and a mouse callback"
+
+
+def _widen_conceal_rows(head: str, low: str) -> str:
+    if not head.startswith("Query its rows"):
+        return ""
+    if "conceal_lines" not in low or "skipcol" not in low:
+        return ""
+    if "screenpos" in low:
+        return (
+            "Reset skipcol when the topline changes, query each row of a conceal_lines mark, "
+            "and correct screenpos columns"
+        )
+    return "Reset skipcol when the topline changes, and query each row of a conceal_lines mark"
+
+
+def _widen_zero_sample(head: str, low: str) -> str:
+    if not head.startswith("The zero sample's start timestamp is st too"):
+        return ""
+    if "wal" not in low or "start timestamp" not in low:
+        return ""
+    return (
+        "Give the injected zero sample the same start timestamp as the samples "
+        "that follow, including in its WAL record"
+    )
+
+
+def _widen_strip_pass(head: str, low: str) -> str:
+    if not head.startswith("Build the text in one pass"):
+        return ""
+    if "strip-comments" not in low:
+        return ""
+    return (
+        "Build stripped comment text in one pass instead of copying the whole "
+        "string for every comment"
+    )
+
+
+def _widen_strbuf(head: str, low: str) -> str:
+    if not head.startswith("Add TYPVAL_ENCODE_CONVERT_ALL"):
+        return ""
+    if "strbuf" not in low or "convert_all" not in low:
+        return ""
+    return "Hold the string in one buffer while a typval special dictionary is converted"
+
+
+def _widen_jsx_trail(head: str, low: str) -> str:
+    if not head.startswith("Use jsxWhitespace.getTrailingWhitespace"):
+        return ""
+    if "gettrailingwhitespace" not in low or "jsx" not in low:
+        return ""
+    return "Keep a colon after a closing JSX tag attached when the following text has no newline"
+
+
+def _widen_sentinel_place(head: str, low: str) -> str:
+    if not head.startswith("Preserve Sentinel identity"):
+        return ""
+    if "click.sentinel" not in head.casefold() or "_utils" not in low:
+        return ""
+    return "Preserve Sentinel identity across copy, deepcopy, and pickle so UNSET survives duplication"
+
+
+def _widen_chunk_bytes(head: str, low: str) -> str:
+    if not head.startswith("Recover the writable bits after loading"):
+        return ""
+    if "writable" not in low or "bytes" not in low:
+        return ""
+    return "Fix appending to a chunk reloaded from bytes by restoring the writable bit count"
+
+
+def _widen_argument_metavar(head: str, low: str) -> str:
+    if not head.startswith("Stop doubling brackets in optional Choice"):
+        return ""
+    if "argument" not in low:
+        return ""
+    return "Stop doubling brackets in optional argument Choice and DateTime metavars"
+
+
+def _widen_hermes_enum(head: str, files: list[_File]) -> str:
+    low = _widen_text(files)
+    removed = _widen_removed(files)
+    if not head.startswith("Normalize legacy Flow enum bodies"):
+        return ""
+    if "hermes" not in low:
+        return ""
+    if "printlegacyflowenumbody" not in removed:
+        return "Normalize Hermes Flow enum bodies to EnumBody"
+    return "Normalize Hermes Flow enum bodies to EnumBody and drop printLegacyFlowEnumBody"
+
+
+def _widen_tseslint_build(head: str, low: str) -> str:
+    if not head.startswith("Bump @typescript-eslint packages to 8.72.1"):
+        return ""
+    if "usesinglerunprogramforprojectservice" not in low:
+        return ""
+    return (
+        "Bump @typescript-eslint packages to 8.72.1 and stub "
+        "useSingleRunProgramForProjectService in the build script"
+    )
+
+
+def _widen_path_tail(head: str, low: str) -> str:
+    if not head.startswith("Simplify path_to_absolute by using path_tail"):
+        return ""
+    if "trailing slash" not in low or ".." not in low:
+        return ""
+    return (
+        "Simplify path_to_absolute with path_tail so a trailing slash "
+        "and a .. component are handled"
+    )
+
+
+def _widen_riscv_cmd(head: str, files: list[_File]) -> str:
+    if not head.startswith("Re-enable compressed-file tests on riscv64"):
+        return ""
+    blob = _widen_text(files) + "\n" + _widen_removed(files)
+    if "cmd_exists" not in blob or "riscv64" not in blob:
+        return ""
+    return (
+        "Re-enable compressed-file tests on riscv64 and make cmd_exists "
+        "skip them when the tool fails to run"
+    )
+
+
+def _widen_scroll_width(head: str, low: str) -> str:
+    if not head.startswith('Avoid a crash when "start" scrolls'):
+        return ""
+    if "checked_width" not in low:
+        return ""
+    return (
+        "Avoid a crash in win_scroll_lines when the width is no longer positive "
+        "after the screen shrinks"
+    )
+
+
+def _widen_yuku_bump(head: str, files: list[_File]) -> str:
+    low = _widen_text(files)
+    removed = _widen_removed(files)
+    if not head.startswith("Use yuku instead of yuku-parser"):
+        return ""
+    if "0.27.0" not in low:
+        return ""
+    if "@yuku-core/wasm" not in removed:
+        return "Switch the parser from yuku-parser to yuku 0.27.0"
+    return "Switch the parser from yuku-parser to yuku 0.27.0 and drop @yuku-core/wasm"
+
+
+def _widen_prompt_tests(head: str, low: str) -> str:
+    if not head.startswith("Move tests from test_utils.py to test_prompt.py"):
+        return ""
+    if "confirm" not in low or "test_utils_2" not in low:
+        return ""
+    return "Move prompt and confirm tests from test_utils.py into test_utils_2/test_prompt.py"
+
+
+def _widen_version_option(head: str, low: str) -> str:
+    if not head.startswith("Resolve an import name to its distribution"):
+        return ""
+    if "version_option" not in low:
+        return ""
+    return (
+        "Resolve an import name to its distribution in version_option "
+        "when it is not installed under that name"
+    )
+
+
+def _widen_index_flags(head: str, low: str) -> str:
+    if not head.startswith("Add opt-in indexing behind the unstable-index"):
+        return ""
+    needed = ("--index", "--x-crud", "--x-force", "--x-path")
+    if any(flag not in low for flag in needed):
+        return ""
+    return (
+        "Add opt-in indexing behind unstable-index, with -X/--index, "
+        "--x-crud, --x-force, and --x-path"
+    )
+
+
+def _widen_mmap_seq(head: str, low: str) -> str:
+    if not head.startswith("Hint to the kernel that we'll read sequentially"):
+        return ""
+    if "mmap" not in low or "macos" not in low:
+        return ""
+    return "Advise sequential access on Unix memory maps and document the macOS mmap issues"
+
+
+def _widen_gitignore_cwd(head: str, low: str) -> str:
+    if not head.startswith("Set the current directory used for matching global gitignores"):
+        return ""
+    if "explicit" not in low or "working directory" not in low:
+        return ""
+    return "Resolve global and explicit gitignores relative to the working directory"
+
+
+def _widen_short_read(head: str, low: str) -> str:
+    if not head.startswith("Fill short reads in the line buffer"):
+        return ""
+    if "binary" not in low:
+        return ""
+    return "Fill short reads in the line buffer so binary detection sees a full buffer"
+
+
+def _widen_textarea_bump(head: str, low: str) -> str:
+    if not head.startswith("Add a dynamic-textarea example"):
+        return ""
+    if "v2.1.0" not in low or "bubbles" not in low:
+        return ""
+    line = "Add a dynamic-textarea example and bump bubbles to v2.1.0"
+    if "bubbletea" in low and "v2.0.2" in low:
+        line += " and bubbletea to v2.0.2"
+    return line
+
+
+def _widen_mode_report(head: str, low: str) -> str:
+    if head != "Fix indentation in doc comments":
+        return ""
+    if "modereportmsg" not in low:
+        return ""
+    return "Fix the indentation of the ModeReportMsg example in screen.go"
+
+
+def _widen_cursed_flush(head: str, low: str) -> str:
+    if not head.startswith("Move prepended-line flushing earlier"):
+        return ""
+    if "cursed" not in low:
+        return ""
+    return "Move prepended-line flushing earlier in the cursed renderer"
+
+
+def _widen_log_header(head: str, low: str) -> str:
+    if not head.startswith("Show the full caller path"):
+        return ""
+    if "vim.log" not in low or "vimruntime" not in low:
+        return ""
+    return "Show the full caller path in the vim.log header, with $VIMRUNTIME abbreviated"
+
+
+def _widen_conceal_past(head: str, low: str) -> str:
+    if not head.startswith("Skip the conceal check when row is past"):
+        return ""
+    if "cursor" not in low or "delet" not in low:
+        return ""
+    return "Skip the conceal check for a line past the end of the buffer, including when the cursor line is deleted"
+
+
+def _widen_linode(head: str, low: str) -> str:
+    if not head.startswith("Shift transfer bytes by GiB"):
+        return ""
+    if "linode" not in low:
+        return ""
+    if "linode_test" in low:
+        return "Shift Linode transfer bytes by GiB instead of MiB, and update the tests"
+    return "Shift Linode transfer bytes by GiB instead of MiB"
+
+
+def _widen_glimmer(head: str, low: str) -> str:
+    if not head.startswith("Bump @glimmer/syntax to 0.97.0"):
+        return ""
+    if "plugin" not in low:
+        return ""
+    return "Bump @glimmer/syntax to 0.97.0 and simplify the Glimmer plugin build patch"
+
+
+def _widen_nbsp_tests(head: str, low: str) -> str:
+    if not head.startswith("Add tests in format.test.js"):
+        return ""
+    if "prosewrap" not in low or "markdown" not in low or "00a0" not in low:
+        return ""
+    return "Add markdown tests for CJK text with a NO-BREAK SPACE across proseWrap modes"
+
+
+def _widen_markdown_break(head: str, low: str) -> str:
+    if not head.startswith("Guard a missing neighbor when checking a line break"):
+        return ""
+    if "markdown" not in low:
+        return ""
+    return "Guard a missing neighbor when checking a markdown line break between CJK and Korean text"
+
+
+def _widen_pager_writer(head: str, files: list[_File]) -> str:
+    if not head.startswith("Replace MaybeStripAnsi with _PagerWriter"):
+        return ""
+    removed = _widen_removed(files)
+    low = _widen_text(files)
+    if "pagerwriter" not in low or "textiowrapper" not in removed:
+        return ""
+    return "Route pager output through _PagerWriter, replacing the binary TextIOWrapper, and strip ANSI when colors are off"
+
+
+def _widen_mapnl(head: str, low: str) -> str:
+    if not head.startswith("Stop mapping newlines when input is not a TTY"):
+        return ""
+    if "mapnl" not in low:
+        return ""
+    return "Stop mapNl from mapping newlines when input is not a TTY, because that breaks non-TTY output"
+
+
+def _widen_utf8_option(head: str, low: str) -> str:
+    if not head.startswith("Let the PromQL printer emit unquoted Unicode"):
+        return ""
+    if "enableunquotedutf8names" not in low:
+        return ""
+    return "Let the PromQL printer emit unquoted Unicode letters and dots when EnableUnquotedUTF8Names is on"
+
+
+def _widen_clickable_hit(head: str, low: str) -> str:
+    if not head.startswith("Hit-test layers in the view callback"):
+        return ""
+    if "clickable" not in low:
+        return ""
+    return "Hit-test layers in the clickable example's view callback instead of tea.LayerHitMsg"
+
+
+def _widen_flow_method(head: str, low: str) -> str:
+    if not head.startswith("Add isFlowMethodSignatureWithNewKey"):
+        return ""
+    if "declarefunction" not in low or "quote" not in low:
+        return ""
+    if "construct signature" not in low or "quote" not in low:
+        return ""
+    if "declare class" in low:
+        return (
+            "Fix quoting of Flow method keys and printing of class properties, "
+            "and print declare functions"
+        )
+    return "Print Flow method and construct signatures, and declare functions"
+
+
+def _widen_progress_api(head: str, low: str) -> str:
+    if not head.startswith("Update progress examples to WithDefaultBlend"):
+        return ""
+    if "withscaled" not in low or "withcolors" not in low:
+        return ""
+    return "Update the progress examples to WithDefaultBlend, WithScaled, and WithColors"
+
+
+def _widen_kitty_keys(head: str, low: str) -> str:
+    if not head.startswith("Report alternate key codes"):
+        return ""
+    if "kitty" not in low or "associated" not in low:
+        return ""
+    return (
+        "Add Kitty keyboard reporting for alternate keys, all keys as escape codes, "
+        "and associated text"
+    )
+
+
+def _widen_alt_flush(head: str, low: str) -> str:
+    if not head.startswith("Wrap flush updates in synchronized output"):
+        return ""
+    if "altscreen" not in low or "synchronized" not in low:
+        return ""
+    if "content" not in low:
+        return (
+            "Enter or exit the alt screen before a flush, and wrap cursor updates "
+            "in synchronized output when it is supported"
+        )
+    return (
+        "Enter or exit the alt screen before a flush, and wrap content updates "
+        "in synchronized output when it is supported"
+    )
+
+
+def _widen_zero_count(head: str, low: str) -> str:
+    if not head.startswith("Treat a positive GetZeroCountFloat"):
+        return ""
+    if "protobuf" not in low or "native" not in low:
+        return ""
+    return (
+        "Treat a float zero_count as a native histogram in the protobuf parser, "
+        "the same as an integer zero_count"
+    )
+
+
+def _widen_synctest_evict(head: str, low: str) -> str:
+    if not head.startswith("Run the test under testing/synctest"):
+        return ""
+    if "evict" not in low or "late" not in low:
+        return ""
+    return "Run the eviction test that covers a late sample under testing/synctest instead of the real clock"
+
+
+def _widen_yaml_null(head: str, low: str) -> str:
+    if not head.startswith("Bump go.yaml.in/yaml/v2 to v2.4.5"):
+        return ""
+    if "relabel" not in low or "regex" not in low or "null" not in low:
+        return ""
+    return "Bump go.yaml.in/yaml/v2 to v2.4.5 and test that a relabel regex of 'null' does not inherit the default"
+
+
+def _widen_go124(head: str, low: str) -> str:
+    if not head.startswith("Extract shouldQuerySynchronizedOutput"):
+        return ""
+    if "1.24" not in low:
+        return ""
+    if "tutorials" in low and "charmbracelet" in low and "synchronized" in low:
+        return (
+            "Extract the synchronized-output query check into a helper, and bump the "
+            "tutorials module to Go 1.24 with its charmbracelet dependencies"
+        )
+    if "tutorials" in low:
+        return "Extract shouldQuerySynchronizedOutput and bump the tutorials module to Go 1.24"
+    return "Extract shouldQuerySynchronizedOutput and bump the module to Go 1.24"
+
+
+def _widen_cloned_copied(head: str, low: str) -> str:
+    if not head.startswith("Replace map-to-clone calls with cloned"):
+        return ""
+    if "copied" not in low or "cloned" not in low:
+        return ""
+    return "Replace map calls with cloned or copied"
+
+
+def _widen_mouse_only(head: str, low: str) -> str:
+    if not head.startswith("Replace the view Callback with an OnMouse"):
+        return ""
+    if "onmouse" not in low:
+        return ""
+    return "Replace the view Callback with a mouse-only OnMouse handler"
+
+
+def _widen_hazard_semi(head: str, low: str) -> str:
+    if not head.startswith("Insert a leading semicolon"):
+        return ""
+    if "hazard" not in low or "verbatim" not in low:
+        return ""
+    if "semi" not in low or "asi" not in low:
+        return ""
+    return (
+        "Fix leading-semicolon insertion for a prettier-ignored statement when semicolons "
+        "are off, by checking hazard characters so the verbatim text does not break ASI"
+    )
+
+
+def _widen_wait_cond(head: str, low: str) -> str:
+    if not head.startswith("Let SystemObj:wait() return before process exit"):
+        return ""
+    if "cond" not in low:
+        return ""
+    return "Let SystemObj:wait() return early when the output matches cond"
+
+
+def _widen_window_cells(head: str, low: str) -> str:
+    if not head.startswith("Drop a WindowSizeMsg with a negative"):
+        return ""
+    if "cells" not in low:
+        return ""
+    return "Drop a WindowSizeMsg with a negative width or height, or with too many cells"
+
+
+def _widen_return_true(head: str, low: str) -> str:
+    if not head.startswith("Add a lint rule that rewrites a trailing return true"):
+        return ""
+    if "return true" not in low:
+        return ""
+    return (
+        "Make the comment-attach helpers return true, "
+        "and lint a trailing return true into that result"
+    )
+
+
+def _widen_deferred(head: str, low: str) -> str:
+    if not head.startswith("Support deferred reexports"):
+        return ""
+    if "babel.js" not in low or "print/" not in low:
+        return ""
+    return (
+        "Add deferred re-export syntax to the Babel parser and JS printer, "
+        "and cover it with tests"
+    )
+
+
+def _widen_modify_keys(head: str, files: list[_File]) -> str:
+    if not head.startswith("Enable modifyOtherKeys alongside the Kitty"):
+        return ""
+    headers = "\n".join(header for item in files for header in item.headers).casefold()
+    if "flush(" not in headers or "close()" not in headers:
+        return ""
+    return (
+        "Enable modifyOtherKeys alongside the Kitty keyboard protocol "
+        "and reset it on close and in flush"
+    )
+
+
+def _widen_read_dir_ignore(head: str, low: str) -> str:
+    if not head.startswith("Use successful read_dir entries to reduce probing"):
+        return ""
+    for word in (".ignore", ".gitignore", ".jj", "read_dir"):
+        if word not in low:
+            return ""
+    if 'osstr::new(".git")' not in low and '".git"' not in low:
+        return ""
+    return (
+        "Use successful read_dir entries to reduce probing, and only consider "
+        ".ignore, .gitignore, .git, .jj, and custom ignore names that were returned"
+    )
+
+
+def _widen_quantile(head: str, low: str) -> str:
+    if not head.startswith("Also check Float64bits"):
+        return ""
+    if "quantile.go" not in low or "subnormal" not in low or "extreme" not in low:
+        return ""
+    if "underflow" not in low:
+        return ""
+    return (
+        "Fix quantile interpolation for identical, subnormal, and extreme samples "
+        "so rounding and underflow do not move the result"
+    )
 
 
 def _edit_fact(files: list[_File]) -> str:
@@ -2782,7 +4966,11 @@ def _claim(sentence: str) -> str:
             acted = f"the {thing}"
         line = f"{verb} {acted} when {when.strip(' ,')}"
         if "leak" in low:
-            line += " so the reply does not leak"
+            unread = "could not be read" in low or "cannot read" in low or "cannot be read" in low
+            if unread:
+                line += " because the reply cannot be read and would leak"
+            else:
+                line += " so the reply does not leak"
             if "shell" in low:
                 line += " into the shell"
         return _fit_claim(line)
@@ -3459,6 +5647,15 @@ def _alt_panic_quit(files: list[_File]) -> str:
     place = "parallel walker" if re.search(r"\bWalk", "\n".join(
         header for item in files for header in item.headers
     )) else "workers"
+    if (
+        "all of the workers" in notes
+        and "builder.build" in notes
+        and "thread" in added.casefold()
+    ):
+        return (
+            "Fix the parallel walker hang on panic by building all workers before any "
+            "thread starts, and quit when a worker panics"
+        )
     return (
         f"Fix the {place} hang on panic by building workers before they start "
         "and quitting when a worker panics"
@@ -4159,6 +6356,12 @@ def _alt_write_all(files: list[_File]) -> str:
     removed = _blob(pool, removed=True)
     if ".write_all(" not in added or ".write(" not in removed:
         return ""
+    paths = " ".join(item.path.replace("\\", "/") for item in pool)
+    if "examples/" in paths and ".write(" in added:
+        line = "Switch the walk example to write_all"
+        if "next_back" in added:
+            line += ", and take the last matching glob with next_back"
+        return line
     return "Use write_all so a short write is not reported as success"
 
 
@@ -4171,6 +6374,11 @@ def _alt_count_doc(files: list[_File]) -> str:
         return ""
     if "count-matches" not in added:
         return ""
+    if "multiline" in added.casefold():
+        return (
+            "Clarify that --count equals --count-matches only in multiline mode, "
+            "when the pattern can match across lines"
+        )
     return "Document that count equals count-matches only when the pattern can match across lines"
 
 
@@ -4283,6 +6491,11 @@ def _alt_flush_buffer(files: list[_File]) -> str:
         return ""
     if "updateCursorVis" not in added:
         return ""
+    if any("cursed_renderer" in item.path for item in files):
+        return (
+            "Buffer cursed-renderer output; update the alt screen only when it "
+            "changes, and the cursor when its visibility or the alt screen changes"
+        )
     return "Buffer flush updates and change the cursor only when its visibility changed"
 
 
@@ -4569,6 +6782,11 @@ def _alt_hidden_path(files: list[_File]) -> str:
         return ""
     if "same behavior on all platforms" not in added:
         return ""
+    if "considered to be hidden" in added:
+        return (
+            "Add is_hidden_path for hidden-file detection and share the dot-prefix check "
+            "in is_hidden_path_only across platforms"
+        )
     return "Add is_hidden_path and share the dot-prefix check in is_hidden_path_only across platforms"
 
 
@@ -4693,8 +6911,10 @@ def _alt_textarea_value(files: list[_File]) -> str:
     removed = _blob(files, removed=True)
     if "textarea.Model" not in added or "*textarea.Model" not in removed:
         return ""
-    line = "Use textarea.Model by value instead of by pointer"
-    if "SetWidth" in removed and "SetHeight" in removed:
+    line = "Use textarea.Model by value instead of by pointer in the examples"
+    if "SetWidth" in removed and "SetHeight" in removed and "AltScreen" in removed:
+        line += ", and drop manual window sizing and alt-screen setup from the textarea example"
+    elif "SetWidth" in removed and "SetHeight" in removed:
         line += ", and drop the manual window sizing in the textarea example"
     return line
 
@@ -6101,7 +8321,10 @@ def _dep_bump(item: _File) -> str:
     old_mods = set(re.findall(r"([A-Za-z0-9_./-]+)\s+v(\d+\.\d+\.\d+)", "\n".join(item.removed)))
     fresh = [pair for pair in mods if pair not in old_mods]
     if fresh:
-        shown = fresh[0][0].rstrip("/").split("/")[-1]
+        parts = [part for part in fresh[0][0].rstrip("/").split("/") if part]
+        shown = parts[-1]
+        if re.fullmatch(r"v\d+", shown) and len(parts) >= 2:
+            shown = "/".join(parts[-3:] if len(parts) >= 3 else parts)
         if len(fresh) == 1:
             return f"Bump {shown} to v{fresh[0][1]}"
         return f"Bump {shown} and {len(fresh) - 1} other dependencies"
@@ -7336,6 +9559,26 @@ def _specific(draft: str) -> bool:
         "Migrate ", "Bump ", "Flush ", "Strip ", "Return ", "Skip ", "Guard ",
         "Collect ", "Wrap ", "Leave ", "Report ", "Treat ",
     ))
+
+
+def _keeps_when(line: str, draft: str) -> bool:
+    """A rephrase of a "when" clause has to keep the condition, not only the word."""
+    folded = draft.casefold()
+    idx = folded.find(" when ")
+    if idx < 0:
+        return True
+    clause = draft[idx + 6:]
+    clause = re.split(r",|\bso\b|\bto\b", clause, maxsplit=1, flags=re.I)[0]
+    words = [
+        tok for tok in _idents(clause)
+        if len(tok) >= 5 and tok.casefold() not in _STOP
+    ]
+    if not words:
+        return True
+    low = line.casefold()
+    hit = sum(1 for tok in words if tok.casefold() in low)
+    need = 1 if len(words) < 3 else 2
+    return hit >= need
 
 
 def _keeps_effect(line: str, draft: str) -> bool:

@@ -1168,3 +1168,128 @@ diff --git a/ssh.lua b/ssh.lua
     assert "nil" in text.casefold()
     assert "update" not in text.casefold()
 
+
+def test_rebuilding_a_string_in_a_loop_is_one_pass():
+    patch = """\
+diff --git a/strip-comments.js b/strip-comments.js
+--- a/strip-comments.js
++++ b/strip-comments.js
+@@ -1,8 +1,9 @@ function stripCommentsFromText(text, comments) {
+-    text =
+-      text.slice(0, start) +
+-      replaceNonLineBreaksWithSpace(text.slice(start, end)) +
+-      text.slice(end);
++    result +=
++      text.slice(previousEnd, start) +
++      replaceNonLineBreaksWithSpace(text.slice(start, end));
++    previousEnd = end;
+"""
+    text = digest.line("", patch)
+    assert "one pass" in text.casefold()
+    assert "update" not in text.casefold()
+
+
+def test_pick_rejects_an_update_that_drops_the_operator():
+    import harness
+    draft = "Add bitwise AND, OR, and XOR operators"
+    weaker = "Update test for bitwise operators"
+    assert harness.pick(weaker, draft, f"draft: {draft}") == draft
+
+
+def test_a_reordered_struct_keeps_the_fields():
+    patch = """\
+diff --git a/scrape/scrape.go b/scrape/scrape.go
+--- a/scrape/scrape.go
++++ b/scrape/scrape.go
+@@ -1,3 +1,3 @@ type scraper struct {
+-	offsetSeed uint64
+-	metrics    *scrapeMetrics
++	metrics    *scrapeMetrics
++	offsetSeed uint64
+diff --git a/tsdb/chunkenc/xor.go b/tsdb/chunkenc/xor.go
+--- a/tsdb/chunkenc/xor.go
++++ b/tsdb/chunkenc/xor.go
+@@ -1,2 +1,2 @@ type iterator struct {
+-	t   int64
++	t int64
+ 	val float64
+"""
+    text = digest.line("", patch)
+    assert "reorder" in text.casefold()
+    assert "scrape" in text.casefold()
+    assert "update" not in text.casefold()
+
+
+def test_parentheses_stay_on_a_type_argument():
+    patch = """\
+diff --git a/needs-parentheses.js b/needs-parentheses.js
+--- a/needs-parentheses.js
++++ b/needs-parentheses.js
+@@ -1,2 +1,3 @@ function needsParens(path) {
++    case "TSInstantiationExpression":
+     return false
+diff --git a/operand.ts b/operand.ts
+--- a/operand.ts
++++ b/operand.ts
+@@ -1,1 +1,2 @@
++x = (a + b)<T>;
+"""
+    text = digest.line("", patch)
+    assert "(a + b)<T>" in text
+    assert "parenthesize a tsinstantiation" not in text.casefold()
+
+
+def test_a_permanently_enabled_flag_is_the_subject():
+    patch = """\
+diff --git a/main.go b/main.go
+--- a/main.go
++++ b/main.go
+@@ -1,3 +1,3 @@ func setFeatures(o string) {
+-			case "promql-unquoted-utf8-names":
+-				c.parserOpts.EnableUnquotedUTF8Names = true
++			case "promql-unquoted-utf8-names":
++				logger.Warn("This option for --enable-feature is now permanently enabled and therefore a no-op.", "option", o)
+"""
+    text = digest.line("", patch)
+    assert "promql-unquoted-utf8-names" in text
+    assert "no-op" in text.casefold()
+
+
+def test_pick_rejects_a_code_tail():
+    import harness
+    draft = "Stop the truncate loop before taking db.mtx, since truncate needs it"
+    raw = draft + "; db.mtx.Lock() | defer db.mtx.Unlock()"
+    assert harness.pick(raw, draft) == draft
+
+
+def test_pick_rejects_a_rephrase_that_drops_when():
+    import harness
+    draft = (
+        "Stop the file watch when the watched file's parent directory is deleted, "
+        "to avoid endless EPERM errors"
+    )
+    raw = "Stop handle to prevent endless EPERM errors"
+    assert harness.pick(raw, draft) == draft
+    garbled = "Stop handling when preventing endless EPERM errors"
+    assert harness.pick(garbled, draft) == draft
+
+
+def test_a_nan_comment_names_both_functions():
+    import harness
+    patch = """\
+diff --git a/promql/durations.go b/promql/durations.go
+--- a/promql/durations.go
++++ b/promql/durations.go
+@@ func minOf() {
++// Match the min aggregator: NaN is only returned if both values are NaN.
++min_of(lhs, rhs)
++max_of(lhs, rhs)
+"""
+    files = harness._parse(patch)
+    text = harness._widen(
+        "Match the min aggregator: NaN is only returned if both values are NaN",
+        files,
+    )
+    assert "min_of" in text and "max_of" in text
+    assert "duration" in text.casefold()
+
