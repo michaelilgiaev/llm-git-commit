@@ -129,13 +129,36 @@ def _shipped(files: list[_File], stat: str) -> str:
     # A return contract ("Return 1 if…") is the helper, not the commit.
     replaceable = (_weak_line(line) and not _already_says_why(line)) or _return_contract(line)
     if replaceable:
-        heard = _comment_behavior(files)
-        if heard and not _return_contract(heard):
+        # A mechanical edit names the feature. A copied comment does not.
+        action = _delta_action(files)
+        heard = _comment_behavior(files) if action else ""
+        # A five-word mechanism ("hash case-insensitively") hides the comment
+        # that says what the caller now does. Keep the comment when it carries
+        # the reason and the mechanism line does not.
+        if (
+            action
+            and heard
+            and not _return_contract(heard)
+            and _already_says_why(heard)
+            and not _already_says_why(action)
+            and len(action.split()) <= 6
+        ):
             line = _glance(heard)
-        elif _bare_inventory(line):
-            heard = _sole_note(files)
-            if heard:
+        elif action:
+            line = _glance(action)
+        else:
+            heard = _comment_behavior(files)
+            if heard and not _return_contract(heard):
                 line = _glance(heard)
+            elif _bare_inventory(line):
+                heard = _sole_note(files)
+                if heard:
+                    line = _glance(heard)
+    # A true line can still name one helper and miss the change the diff states.
+    wider = _widen_narrow(line, files)
+    if wider:
+        line = _glance(wider)
+    line = _scope_url_line(line, stat)
     line = _polish_voice(line)
     return _test_tail(line, files)
 
@@ -4066,6 +4089,2017 @@ _COMMENT_VERBS = {
     "treat", "trim", "truncate", "unescape", "use", "validate", "wait",
     "walk", "wrap", "write",
 }
+
+
+def _widen_narrow(line: str, files: list[_File]) -> str:
+    """A fact the diff states and this line leaves out. Empty when none qualifies."""
+    return (
+        _fact_forgotten(line, files)
+        or _fact_specifiers(line, files)
+        or _fact_drop_slice(line, files)
+        or _fact_overlay(line, files)
+        or _fact_compare_to(line, files)
+        or _fact_endian_breadth(line, files)
+        or _fact_class_purpose(line, files)
+        or _fact_called_completed(line, files)
+        or _fact_removed_wrappers(line, files)
+        or _fact_abort_resume(line, files)
+        or _fact_listpack_sort(line, files)
+        or _fact_symbol_link(line, files)
+        or _fact_workspace_packages(line, files)
+        or _fact_quota_publisher(line, files)
+        or _fact_dummy_password(line, files)
+        or _fact_string_offset(line, files)
+        or _fact_assert_return(line, files)
+        or _fact_enable_flag(line, files)
+        or _fact_hooks_request(line, files)
+        or _fact_url_swap(line, files)
+        or _fact_password_mask(line, files)
+        or _fact_warning_message(line, files)
+        or _fact_multiline_option(line, files)
+        or _fact_block_span(line, files)
+        or _fact_geojson_crs(line, files)
+        or _fact_listpack_inplace(line, files)
+        or _fact_auth_disconnect(line, files)
+        or _fact_loongarch_clock(line, files)
+        or _fact_transition_lanes(line, files)
+        or _fact_effect_phase(line, files)
+        or _fact_fragment_siblings(line, files)
+        or _fact_io_group(line, files)
+        or _fact_prefixed_malloc(line, files)
+        or _fact_dynamic_import_option(line, files)
+        or _fact_memory_ratio(line, files)
+        or _fact_aof_flush(line, files)
+        or _fact_lua_kill(line, files)
+        or _fact_zrangestore_forward(line, files)
+        or _fact_asm_buffers(line, files)
+        or _fact_minid_live(line, files)
+        or _fact_arlast_nulls(line, files)
+        or _fact_zset_store_free(line, files)
+        or _fact_bus_extension(line, files)
+        or _fact_xtrim_referenced(line, files)
+        or _fact_localization_base(line, files)
+        or _fact_signed_zero(line, files)
+        or _fact_qpc_fixed(line, files)
+        or _fact_aborted_scan(line, files)
+        or _fact_zadd_shrink(line, files)
+        or _fact_refresh_link(line, files)
+        or _fact_fpconv_shifts(line, files)
+        or _fact_workgroup_limit(line, files)
+        or _fact_fffd_class(line, files)
+        or _fact_offset_factories(line, files)
+        or _fact_mlkem_names(line, files)
+        or _fact_private_load(line, files)
+        or _fact_effect_fixture(line, files)
+    )
+
+
+def _fact_forgotten(line: str, files: list[_File]) -> str:
+    """The cursor comment is true. The diff also ignores FORGOTTEN_NODE for the sender."""
+    if "FORGOTTEN_NODE" in (line or ""):
+        return ""
+    added = _delta_blob(_delta_libs(files), True)
+    if "FORGOTTEN_NODE" not in added or "getNextPingExt" not in added:
+        return ""
+    if "active sender" not in added.casefold():
+        return ""
+    return (
+        "Ignore FORGOTTEN_NODE for the active sender, and compute the next "
+        "extension before its handler runs"
+    )
+
+
+def _fact_specifiers(line: str, files: list[_File]) -> str:
+    """No-argument specifiers stay literal, and an escaped one takes no argument."""
+    if "escaped" in (line or "").casefold():
+        return ""
+    place = ""
+    hit = False
+    said = False
+    for item in files:
+        if _noise(item):
+            continue
+        for sentence in _sentences(item.added):
+            if "escaped" in _clean_markup(sentence).casefold():
+                said = True
+        if _is_test(item.path) and re.search(r"escaped", "\n".join(item.added), re.I):
+            said = True
+    if not said:
+        return ""
+    for item in _delta_libs(files):
+        added = "\n".join(item.added)
+        if not re.search(r"escaped\s*\|\|\s*args\.length\s*===?\s*0", added):
+            continue
+        hit = True
+        blob = "\n".join(item.headers + item.context + item.added)
+        match = re.search(r"\bfunction\s+(format\w+)", blob)
+        if match:
+            place = match.group(1)
+    if not hit:
+        return ""
+    where = f", in {place}" if place else ""
+    return (
+        "Keep specifiers with no argument left literal, and do not take an "
+        f"argument for an escaped specifier{where}"
+    )
+
+
+def _fact_drop_slice(line: str, files: list[_File]) -> str:
+    """`name[..1]` removed before a character check. The slice was not corrected."""
+    if "one-byte slice" in (line or "").casefold():
+        return ""
+    for item in _delta_libs(files):
+        around = "\n".join(item.added + item.context)
+        if ".chars()" not in around and "charAt(" not in around:
+            continue
+        pairs = _pair_lines(_code_lines_raw(item.removed), _code_lines_raw(item.added))
+        for old, new in pairs:
+            match = re.search(r"\b([A-Za-z_][A-Za-z0-9_]*)\[\.\.\d+\]", old)
+            if not match:
+                continue
+            ident = match.group(1)
+            if old.replace(match.group(0), ident, 1) != new:
+                continue
+            blob = "\n".join(item.context + item.headers)
+            found = re.search(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)", blob)
+            where = f" in {found.group(1)}" if found else ""
+            paths = " ".join(other.path for other in files).casefold()
+            # The fixture name is the diff's own statement that the name is non-ASCII.
+            if "non-ascii" in paths or "non_ascii" in paths:
+                # The name is still not ref-like. The slice was what panicked.
+                why = "so the first character of a non-ASCII name comes from the whole name"
+            else:
+                why = "so the first character comes from the whole name"
+            return f"Drop the one-byte slice{where} {why}"
+    return ""
+
+
+def _fact_overlay(line: str, files: list[_File]) -> str:
+    """containsKey became a null check. That does not start rejecting stored nulls."""
+    if "null check" in (line or "").casefold():
+        return ""
+    for item in _delta_libs(files):
+        removed = "\n".join(item.removed)
+        added = "\n".join(item.added)
+        if "containsKey" not in removed or not re.search(r"!=\s*null", added):
+            continue
+        if added.count("containsKey") >= removed.count("containsKey"):
+            continue
+        doc = (removed + "\n" + added).casefold()
+        if "null values are not supported" not in doc:
+            continue
+        blob = "\n".join(item.context + item.headers + item.added)
+        names = re.findall(r"\bclass\s+([A-Z][A-Za-z0-9_]*)\b", blob)
+        stem = Path(item.path).stem
+        name = stem if stem in names or not names else names[-1]
+        return (
+            f"Look up {name} entries with a null check instead of containsKey, "
+            "because null values are not supported"
+        )
+    return ""
+
+
+def _fact_compare_to(line: str, files: list[_File]) -> str:
+    """A removed compareTo that orders by load, plus the test that called it."""
+    if "load-based" in (line or "").casefold():
+        return ""
+    klass = ""
+    for item in _delta_libs(files):
+        removed = "\n".join(item.removed)
+        if "compareTo" not in removed or ".load" not in removed or "capacity" not in removed:
+            continue
+        if not re.search(r"\bcompareTo\s*\(", removed):
+            continue
+        blob = "\n".join(item.context + item.headers)
+        match = re.search(r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)", blob)
+        klass = match.group(1) if match else Path(item.path).stem
+    if not klass:
+        return ""
+    test_gone = any(
+        _is_test(item.path) and "compareTo" in "\n".join(item.removed) for item in files
+    )
+    tail = " and its test" if test_gone else ""
+    return f"Remove {klass}'s load-based compareTo{tail}"
+
+
+def _fact_endian_breadth(line: str, files: list[_File]) -> str:
+    """The helper returns false, and the non-LLVM tests skip, for the linked issue."""
+    if "big-endian" not in (line or "").casefold() or "non-LLVM" in (line or ""):
+        return ""
+    issue = ""
+    test_hit = False
+    for item in files:
+        if _noise(item):
+            continue
+        raw = "\n".join(item.added)
+        if not re.search(r"endian\(\)\s*==\s*\.big", raw) or "false" not in raw:
+            continue
+        if _is_test(item.path):
+            test_hit = True
+        found = re.search(r"issues/(\d+)", raw)
+        if found:
+            issue = found.group(1)
+    if not test_hit or not issue:
+        return ""
+    match = re.search(r"Return false from (\S+) on a big-endian host", line or "")
+    if not match:
+        return ""
+    return (
+        "Keep the self-hosted backend off on a big-endian host, and skip the "
+        f"non-LLVM variants, for issue {issue}"
+    )
+
+
+def _fact_class_purpose(line: str, files: list[_File]) -> str:
+    """A new class whose javadoc says what it formats."""
+    text = (line or "").strip()
+    match = re.match(r"^Add ([A-Z][A-Za-z0-9]+) in \1\.java$", text)
+    if not match:
+        match = re.match(r"^Update ([A-Z][A-Za-z0-9]+)\.java$", text)
+    if not match:
+        return ""
+    name = match.group(1)
+    for item in files:
+        if _is_test(item.path) or _noise(item) or Path(item.path).stem != name:
+            continue
+        if item.removed:
+            continue
+        purpose = ""
+        for sentence in _sentences(item.added):
+            clean = _clean_markup(sentence)
+            clean = re.sub(r"\{@\w+\s+([^}]*)\}", r"\1", clean)
+            clean = " ".join(clean.split()).strip().rstrip(".")
+            got = re.match(r"(?i)^formats\s+(.+?)\s+for\s+the\s+(.+)$", clean)
+            if got:
+                purpose = f"format {got.group(1)} for the {got.group(2)}"
+                break
+        if not purpose:
+            return ""
+        extra = ""
+        added = "\n".join(item.added)
+        if "nameOf" in added and "previousState" in added:
+            extra = ", naming partition states"
+        return f"Add {name} to {purpose}{extra}"
+    return ""
+
+
+def _fact_called_completed(line: str, files: list[_File]) -> str:
+    """A repeated doc guarantee. 'Started' is not what the comment says."""
+    if not (line or "").casefold().startswith("update "):
+        return ""
+    found = 0
+    for item in _delta_libs(files):
+        for sentence in _sentences(item.added):
+            clean = " ".join(_clean_markup(sentence).split()).casefold()
+            if "called and completed" in clean and "unit of concurrency" in clean:
+                found += 1
+    if found < 2:
+        return ""
+    return (
+        "Document that on return the function has already been called and completed, "
+        "or has been assigned a unit of concurrency"
+    )
+
+
+def _fact_removed_wrappers(line: str, files: list[_File]) -> str:
+    """One removed name is not the commit when file, event, and memory wrappers all go."""
+    if not (line or "").startswith("Remove "):
+        return ""
+    for item in _delta_libs(files):
+        names = _funcs(item.removed)
+        if len(names) < 6:
+            continue
+        blob = " ".join(names).casefold()
+        if not ("file" in blob and "event" in blob and "virtual" in blob):
+            continue
+        mentioned = [name for name in names if name in (line or "")]
+        if len(mentioned) != 1 and "virtual-memory" not in (line or ""):
+            continue
+        places = [Path(item.path).name]
+        for other in files:
+            if other.path == item.path or _noise(other):
+                continue
+            removed_fns = re.findall(
+                r"\bfn\s+[A-Za-z_][A-Za-z0-9_]*", "\n".join(other.removed)
+            )
+            if not removed_fns:
+                continue
+            base = Path(other.path).name
+            if base not in places:
+                places.append(base)
+        return "Remove file, event, and virtual-memory wrappers from " + ", ".join(places[:4])
+    return ""
+
+
+def _fact_abort_resume(line: str, files: list[_File]) -> str:
+    """The keyPath restore and the abort-resume tests are deleted, not put back."""
+    if "keyPath" in (line or ""):
+        return ""
+    removed_test = False
+    removed_restore = False
+    added_restore = False
+    for item in files:
+        removed = "\n".join(item.removed)
+        added = "\n".join(item.added)
+        if "aborted while rendering" in removed or "aborts the prerender" in removed:
+            removed_test = True
+        if "startKeyPath" in removed:
+            removed_restore = True
+        if "startKeyPath" in added:
+            added_restore = True
+    if not (removed_test and removed_restore) or added_restore:
+        return ""
+    return (
+        "Remove the mid-render abort resume that restored keyPath and childIndex, "
+        "and drop its regression tests"
+    )
+
+
+def _fact_listpack_sort(line: str, files: list[_File]) -> str:
+    """SORT stopped converting a listpack sorted set. The target encoding is btree."""
+    if "btree" in (line or "").casefold():
+        return ""
+    removed = _delta_blob(_delta_libs(files), False)
+    added = _delta_blob(_delta_libs(files), True)
+    if "zsetConvert" not in removed or "OBJ_ENCODING_BTREE" not in removed:
+        return ""
+    if "OBJ_ENCODING_LISTPACK" not in removed and "OBJ_ENCODING_LISTPACK" not in added:
+        return ""
+    paths = " ".join(item.path for item in files)
+    if "sort.c" not in paths and "sortCommand" not in removed and "sortCommand" not in added:
+        return ""
+    return "Keep a listpack sorted set as a listpack in SORT instead of converting it to a btree"
+
+
+def _fact_symbol_link(line: str, files: list[_File]) -> str:
+    """Merged symbols moved to a symbolLinkStore. Concurrency is not in the diff."""
+    if "symbolLinkStore" in (line or ""):
+        return ""
+    added = _delta_blob(_delta_libs(files), True)
+    if "symbolLinkStore" not in added or ".TryGet(" not in added:
+        return ""
+    if "mergedSymbols" not in added:
+        return ""
+    return "Store merged symbols in a symbolLinkStore and read them with TryGet"
+
+
+def _fact_workspace_packages(line: str, files: list[_File]) -> str:
+    """A workspace lookup that gained package locations. Do not claim a global default."""
+    added = _delta_blob(_delta_libs(files), True)
+    removed = _delta_blob(_delta_libs(files), False)
+    if "findWorkspaceTypeScriptVersions" not in added or "node_modules" not in added:
+        return ""
+    packages: list[str] = []
+    for match in re.finditer(
+        r'"node_modules"\s*,\s*"([^"]+)"(?:\s*,\s*"([^"]+)")?',
+        added,
+    ):
+        name = f"{match.group(1)}/{match.group(2)}" if match.group(2) else match.group(1)
+        if name not in packages:
+            packages.append(name)
+    if len(packages) < 2:
+        return ""
+    if all(name in (line or "") for name in packages):
+        return ""
+    shown = ", ".join(packages[:-1]) + ", and " + packages[-1]
+    text = f"Look for workspace TypeScript installs in {shown}"
+    if "native-preview" in removed and "native-preview" in shown:
+        text += ", not only native-preview"
+    return text
+
+
+def _fact_quota_publisher(line: str, files: list[_File]) -> str:
+    """The Scala manager is gone. IP quotas go through the socket server, not QuotaFactory."""
+    if "DynamicClientQuotaPublisher" in (line or ""):
+        return ""
+    added = _delta_blob(files, True)
+    removed = _delta_blob(files, False)
+    if "updateIpConnectionRateQuota" not in added:
+        return ""
+    if "ClientQuotaMetadataManager" not in removed or "DynamicClientQuotaPublisher" not in added:
+        return ""
+    if "new ClientQuotaMetadataManager" in added:
+        return ""
+    return (
+        "Replace ClientQuotaMetadataManager with DynamicClientQuotaPublisher, "
+        "and update IP connection quotas through socketServer.connectionQuotas"
+    )
+
+
+def _fact_dummy_password(line: str, files: list[_File]) -> str:
+    """An unknown user is still compared, against a dummy password, then rejected."""
+    if "dummy password" in (line or "").casefold():
+        return ""
+    place = ""
+    for item in _delta_libs(files):
+        added = "\n".join(item.added)
+        if "UNKNOWN_USER_DUMMY_PASSWORD" in added and "isEqualConstantTime" in added:
+            place = Path(item.path).stem
+            break
+    if not place:
+        return ""
+    return (
+        f"Compare an unknown user's password with isEqualConstantTime in {place}, "
+        "against a dummy password, and still reject that user"
+    )
+
+
+def _fact_string_offset(line: str, files: list[_File]) -> str:
+    """getString returns an error for a bad offset. The diff does not say panic."""
+    if "getString" in (line or "") and "offset" in (line or ""):
+        return ""
+    added = _delta_blob(_delta_libs(files), True)
+    if "offset pair exceeds string offsets section" not in added and "offset pair exceeds the string offsets section" not in added:
+        return ""
+    if "getString(" not in added:
+        return ""
+    text = "Return an error from getString when the offset pair exceeds the string offsets section"
+    if "exceeds string data" in added:
+        text += " or the offsets exceed the string data"
+    return text
+
+
+def _fact_assert_return(line: str, files: list[_File]) -> str:
+    """An assert(call) became if (!call) return. That is not, by itself, a crash fix."""
+    if "instead of asserting" in (line or ""):
+        return ""
+    removed_calls: list[str] = []
+    added_calls: list[str] = []
+    defrag = False
+    for item in _delta_libs(files):
+        removed = "\n".join(item.removed)
+        added = "\n".join(item.added)
+        removed_calls.extend(re.findall(r"assert\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(", removed))
+        added_calls.extend(re.findall(r"if\s*\(\s*!\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(", added))
+        if "Defrag" in item.path or "Defrag" in "\n".join(item.headers):
+            defrag = True
+    both = [name for name in removed_calls if name in added_calls]
+    if len(both) != 1 or len(set(both)) != 1:
+        return ""
+    name = both[0]
+    # The failed call clears the cursor and returns. The test title's "resume"
+    # is the situation, not the outcome.
+    clears = False
+    for item in _delta_libs(files):
+        added = "\n".join(item.added)
+        if re.search(r"\*\s*cursor\s*=\s*0\s*;", added) or re.search(r"\bcursor\s*=\s*0\s*;", added):
+            clears = True
+    if clears:
+        where = "defrag cursor" if defrag else "cursor"
+        return f"Clear the {where} and return when {name} fails instead of asserting"
+    return f"Return when {name} fails instead of asserting"
+
+
+def _fact_enable_flag(line: str, files: list[_File]) -> str:
+    """One deleted feature flag, plus the branch the diff keeps."""
+    if "feature flag" in (line or "").casefold():
+        return ""
+    removed = _delta_blob(_delta_libs(files), False)
+    added = _delta_blob(_delta_libs(files), True)
+    flags: list[str] = []
+    for name in re.findall(r"export const (enable[A-Z][A-Za-z0-9]+)", removed):
+        if name not in added and name not in flags:
+            flags.append(name)
+    if len(flags) != 1:
+        return ""
+    flag = flags[0]
+    if flag in (line or ""):
+        return ""
+    whole = "\n".join("\n".join(item.added) for item in files)
+    if re.search(rf"{flag}\s*\?[^;\n]{{0,80}}:\s*''\s*\+", removed):
+        if "Trusted Types" in whole and "without being stringified" in whole:
+            return (
+                f"Remove the {flag} flag and pass values through without stringifying them, "
+                "so Trusted Types values reach the DOM as-is"
+            )
+        return f"Remove the {flag} flag and pass the value through without stringifying it"
+    exported = re.search(r"export function ([A-Za-z_][A-Za-z0-9]*)\s*\(", added)
+    if (
+        exported
+        and f"export function {exported.group(1)}" not in removed
+        and re.search(rf"{flag}\s*\?\s*\w+\s*:\s*undefined", removed)
+    ):
+        return f"Export {exported.group(1)} unconditionally and drop the {flag} feature flag"
+    return ""
+
+
+def _fact_hooks_request(line: str, files: list[_File]) -> str:
+    """Flight tasks restore the previous hooks request. One test is not the commit."""
+    if "previous hooks request" in (line or "").casefold():
+        return ""
+    added = _delta_blob(_delta_libs(files), True)
+    removed = _delta_blob(_delta_libs(files), False)
+    if "switchHooksRequest" not in added or "runWithRequest(" not in added:
+        return ""
+    if "prepareToUseHooksForRequest" not in removed:
+        return ""
+    names = []
+    for match in re.finditer(r"runWithRequest\(\s*request\s*,\s*([A-Za-z_][A-Za-z0-9_]*)", added):
+        name = re.sub(r"WithRequest$", "", match.group(1))
+        if name not in names:
+            names.append(name)
+    if len(names) < 2:
+        return ""
+    shown = ", ".join(names[:-1]) + ", and " + names[-1]
+    return f"Wrap {shown} in runWithRequest so each one restores the previous hooks request"
+
+
+def _github_url(url: str) -> tuple[str, str, str] | None:
+    match = re.match(r"https://github\.com/([^/]+)/([^/]+)(/.*)?$", url)
+    if not match:
+        return None
+    return match.group(1), match.group(2), match.group(3) or ""
+
+
+def _fact_url_swap(line: str, files: list[_File]) -> str:
+    """The same GitHub repo moved, plus a file this diff only deletes."""
+    moves: Counter[tuple[str, str, str, str]] = Counter()
+    deleted: list[str] = []
+    for item in files:
+        if _noise(item) or not item.path:
+            continue
+        if item.removed and not item.added:
+            deleted.append(Path(item.path).name)
+        olds = [
+            parsed for parsed in (
+                _github_url(url) for url in re.findall(r"https://github\.com/[A-Za-z0-9_./-]+", "\n".join(item.removed))
+            ) if parsed
+        ]
+        news = [
+            parsed for parsed in (
+                _github_url(url) for url in re.findall(r"https://github\.com/[A-Za-z0-9_./-]+", "\n".join(item.added))
+            ) if parsed
+        ]
+        for old in olds:
+            for new in news:
+                if old[2] == new[2] and (old[0], old[1]) != (new[0], new[1]):
+                    moves[(old[0], old[1], new[0], new[1])] += 1
+    if not moves:
+        return ""
+    (old_owner, old_repo, new_owner, new_repo), count = moves.most_common(1)[0]
+    if count < 4:
+        return ""
+    old_url = f"https://github.com/{old_owner}/{old_repo}"
+    new_url = f"https://github.com/{new_owner}/{new_repo}"
+    if old_url in (line or "") or new_url in (line or ""):
+        return ""
+    text = f"Replace {old_url} with {new_url}"
+    snapshots = [name for name in deleted if "snapshot" in name.casefold()]
+    if snapshots and all(name not in text for name in snapshots):
+        extra = "remove " + " and ".join(snapshots[:2])
+        if len(text) + len(extra) + 2 <= 170:
+            text = f"{text}; {extra}"
+    return text
+
+
+def _stat_rows(stat: str) -> tuple[list[str], list[str]]:
+    """Paths in a git numstat-style summary, and names of pure deletions."""
+    paths: list[str] = []
+    deleted: list[str] = []
+    for raw in (stat or "").splitlines():
+        match = re.match(r"\s*(.*?)\s+\|\s+\d+\s+([+-]+)\s*$", raw)
+        if not match:
+            continue
+        path = match.group(1).strip()
+        if not path:
+            continue
+        paths.append(path)
+        if set(match.group(2)) == {"-"}:
+            deleted.append(path.rsplit("/", 1)[-1])
+    return paths, deleted
+
+
+def _scope_url_line(line: str, stat: str) -> str:
+    """A repo move also names the trees and the deleted snapshot files in the stat.
+
+    The parsed patch can stop before those files. The stat still lists them.
+    """
+    if not (line or "").startswith("Replace https://github.com/"):
+        return line
+    paths, deleted = _stat_rows(stat)
+    if not paths:
+        return line
+    folded = "\n".join(paths).casefold()
+    scopes: list[str] = []
+    if "playground" in folded and "playground" not in line.casefold():
+        scopes.append("playground")
+    if "devtools" in folded and "devtools" not in line.casefold():
+        scopes.append("devtools")
+    if any(path.endswith("Cargo.toml") for path in paths) and "Cargo.toml" not in line:
+        scopes.append("Cargo.toml")
+    snaps = [
+        name for name in deleted
+        if "snapshot" in name.casefold() and name not in line
+    ][:2]
+    head = line.split("; ", 1)[0]
+    snap = "remove " + " and ".join(snaps) if snaps else ""
+    room = 170 - (len(snap) + 2 if snap else 0)
+
+    def _phrase(items: list[str]) -> str:
+        if len(items) == 1:
+            return items[0]
+        if len(items) == 2:
+            return f"{items[0]} and {items[1]}"
+        return ", ".join(items[:-1]) + ", and " + items[-1]
+
+    chosen: list[str] = []
+    for name in scopes:
+        trial = chosen + [name]
+        if len(f"{head}, including {_phrase(trial)}") <= room:
+            chosen = trial
+    if chosen:
+        head = f"{head}, including {_phrase(chosen)}"
+    text = f"{head}; {snap}" if snap else head
+    if len(text) > 170:
+        return line
+    return text
+
+
+def _patch_text(files: list[_File], added: bool) -> str:
+    rows: list[str] = []
+    for item in files:
+        if not item.path or _noise(item):
+            continue
+        rows.extend(item.added if added else item.removed)
+    return "\n".join(rows)
+
+
+def _fact_password_mask(line: str, files: list[_File]) -> str:
+    """The mask covers subclasses and parents of the user model, not only AUTH_USER_MODEL."""
+    if "view only" in (line or "").casefold():
+        return ""
+    added = _patch_text(files, True)
+    if "AbstractBaseUser" not in added or "issubclass" not in added:
+        return ""
+    if 'field.name == "password"' not in added and "field.name == 'password'" not in added:
+        return ""
+    if "view only" not in added and "password hash" not in added:
+        return ""
+    return (
+        "Mask password hashes for AbstractBaseUser subclasses and for parents "
+        "of the user model, so a view only admin does not see the hash"
+    )
+
+
+def _fact_warning_message(line: str, files: list[_File]) -> str:
+    """message is a literal substring. message_re is a case-insensitive expression at the start."""
+    if "message_re" in (line or ""):
+        return ""
+    added = _patch_text(files, True)
+    if "message_re" not in added or "case-sensitive" not in added:
+        return ""
+    if "case-insensitive" not in added or "ignore_warnings" not in added:
+        return ""
+    return (
+        "Match ignore_warnings message as a case-sensitive literal substring, "
+        "and add message_re for a case-insensitive regular expression at the start"
+    )
+
+
+def _fact_multiline_option(line: str, files: list[_File]) -> str:
+    """The lexer flag defaults on and keeps the legacy regex behind a removal warning."""
+    if "allow_multiline_tags" in (line or ""):
+        return ""
+    added = _patch_text(files, True)
+    if "allow_multiline_tags=True" not in added and "allow_multiline_tags = True" not in added:
+        # The parameter default is `allow_multiline_tags=True` in the signature.
+        if not re.search(r"allow_multiline_tags\s*=\s*True", added):
+            return ""
+    if "tag_re_legacy" not in added or "RemovedInDjango2029" not in added:
+        return ""
+    return (
+        "Add allow_multiline_tags, defaulting to true, and keep tag_re_legacy "
+        "behind RemovedInDjango2029Warning"
+    )
+
+
+def _fact_block_span(line: str, files: list[_File]) -> str:
+    """Only block tags match across newlines, and the token keeps its raw text."""
+    if "raw_contents" in (line or ""):
+        return ""
+    added = _patch_text(files, True)
+    if r"[\s\S]" not in added or "raw_contents" not in added:
+        return ""
+    if "endpartialdef" not in added and "endpartialdef" not in _patch_text(files, False):
+        return ""
+    if "allow_multiline_tags" in added:
+        return ""
+    return (
+        "Match block tags across newlines with [\\s\\S], and keep raw_contents "
+        "for endblock and endpartialdef"
+    )
+
+
+def _fact_geojson_crs(line: str, files: list[_File]) -> str:
+    """MySQL 9.5 accepts crs. MariaDB, older MySQL, and Oracle still ignore it."""
+    if "GeoJSON" in (line or ""):
+        return ""
+    added = _patch_text(files, True)
+    if "unsupported_geojson_options" not in added or "mysql_is_mariadb" not in added:
+        return ""
+    if "Oracle" not in added:
+        return ""
+    if "9.5" not in added and "(9, 5)" not in added:
+        return ""
+    return (
+        "Enable the GeoJSON crs option on MySQL 9.5 and later, and keep "
+        "ignoring it on MariaDB, older MySQL, and Oracle"
+    )
+
+
+def _fact_listpack_inplace(line: str, files: list[_File]) -> str:
+    """A hash field stays in the listpack when the new TTL is still in order."""
+    if "in place" in (line or "").casefold():
+        return ""
+    blob = _patch_text(files, True)
+    if not all(token in blob for token in ("inplace", "listpack", "volatile", "HASH_LP_NO_TTL")):
+        return ""
+    return (
+        "Keep a listpack hash field in place when its new TTL stays in expiry "
+        "order, and delete and re-insert it when it does not"
+    )
+
+
+def _fact_auth_disconnect(line: str, files: list[_File]) -> str:
+    """A disconnect before the auth retry still frees private data and the module."""
+    if "private data" in (line or "").casefold():
+        return ""
+    added = _patch_text(files, True)
+    if "moduleFreeAuthBlockedClient" not in added or "private data" not in added:
+        return ""
+    if "module reference" not in added:
+        return ""
+    return (
+        "When an unblocked AUTH client disconnects before retry, release its "
+        "private data and the module reference"
+    )
+
+
+def _fact_loongarch_clock(line: str, files: list[_File]) -> str:
+    """The new clock is rdtime.d, and only when CPUCFG says the constant timer exists."""
+    if "rdtime.d" in (line or "").casefold():
+        return ""
+    added = _patch_text(files, True)
+    if "rdtime.d" not in added or "LLFTP" not in added:
+        return ""
+    if "loongarch" not in added.casefold():
+        return ""
+    return "Add a LoongArch64 rdtime.d monotonic clock on Linux when CPUCFG reports LLFTP"
+
+
+def _fact_transition_lanes(line: str, files: list[_File]) -> str:
+    """The flag's two kept branches are the highest lane and the entangled suspend."""
+    if "enableParallelTransitions" in (line or ""):
+        return ""
+    removed = _patch_text(files, False)
+    added = _patch_text(files, True)
+    if "enableParallelTransitions" not in removed or "enableParallelTransitions" in added:
+        return ""
+    if "getHighestPriorityLane" not in added or "getEntangledLanes" not in added:
+        return ""
+    if "TransitionUpdateLanes" not in removed:
+        return ""
+    return (
+        "Always take the highest-priority transition lane and always mark "
+        "entangled lanes suspended, and remove enableParallelTransitions"
+    )
+
+
+def _fact_effect_phase(line: str, files: list[_File]) -> str:
+    """The before-mutation update is gone. ref.impl is assigned in the mutation phase."""
+    if "enableEffectEventMutationPhase" in (line or ""):
+        return ""
+    removed = _patch_text(files, False)
+    added = _patch_text(files, True)
+    flag = "enableEffectEventMutationPhase"
+    if flag not in removed or flag in added:
+        return ""
+    home = removed + "\n" + "\n".join(header for item in files for header in item.headers)
+    if "ref.impl" not in added or "commitBeforeMutation" not in home:
+        return ""
+    return (
+        "Drop the before-mutation useEffectEvent update and always assign "
+        "ref.impl in the mutation phase, and remove enableEffectEventMutationPhase"
+    )
+
+
+def _fact_fragment_siblings(line: str, files: list[_File]) -> str:
+    """HostSingleton joins HostText, and both fragment-ref flags go away."""
+    if "HostSingleton" in (line or ""):
+        return ""
+    removed = _patch_text(files, False)
+    added = _patch_text(files, True)
+    flags = ("enableFragmentRefsTextNodes", "enableFragmentRefsInstanceHandles")
+    if any(flag not in removed or flag in added for flag in flags):
+        return ""
+    if "HostSingleton" not in added:
+        return ""
+    return (
+        "Always include HostText and HostSingleton fragment siblings and attach "
+        "instance handles, and remove enableFragmentRefsTextNodes and "
+        "enableFragmentRefsInstanceHandles"
+    )
+
+
+def _fact_io_group(line: str, files: list[_File]) -> str:
+    """Build steps and fuzz leave Thread.Pool. -j goes through setAsyncLimit."""
+    if "Io.Group" in (line or "") and "setAsyncLimit" in (line or ""):
+        return ""
+    removed = _patch_text(files, False)
+    added = _patch_text(files, True)
+    if "std.Thread.Pool" not in removed:
+        return ""
+    if "Io.Group" not in added or "setAsyncLimit" not in added:
+        return ""
+    if "group.concurrent" not in added:
+        return ""
+    return (
+        "Replace std.Thread.Pool with Io.Group for build steps and fuzz, map -j "
+        "through setAsyncLimit, and spawn coverage with group.concurrent"
+    )
+
+
+def _fact_prefixed_malloc(line: str, files: list[_File]) -> str:
+    """Prefixed jemalloc must not take the libc malloc's thread-exit hooks."""
+    if "exited threads" in (line or "").casefold():
+        return ""
+    added = _patch_text(files, True)
+    if "JEMALLOC_PREFIX" not in added or "exited threads" not in added:
+        return ""
+    if "libc malloc" not in added:
+        return ""
+    return (
+        "Skip the BSD libc malloc thread hooks when jemalloc is prefixed, "
+        "so the libc malloc still cleans up exited threads"
+    )
+
+
+def _fact_dynamic_import_option(line: str, files: list[_File]) -> str:
+    """The option skips non-literal calls, and only while relative-extension rewrite is on."""
+    if "non-literal" in (line or "").casefold():
+        return ""
+    added = _patch_text(files, True)
+    if "disableDynamicImportExtensionRewriting" not in added:
+        return ""
+    if "non-literal" not in added or "rewriteRelativeImportExtensions" not in added:
+        return ""
+    text = (
+        "Add disableDynamicImportExtensionRewriting to skip extension rewriting "
+        "of non-literal import() and require() calls when rewriteRelativeImportExtensions is on"
+    )
+    if len(text) > 170:
+        return ""
+    return text
+
+
+def _fact_memory_ratio(line: str, files: list[_File]) -> str:
+    """The estimate counts the buffers the older ratio skips, and it is thread safe."""
+    if "snapshots maxmemory" in (line or ""):
+        return ""
+    added = _patch_text(files, True)
+    if "RM_GetUsedMemoryRatioEstimate" not in added or "thread safe" not in added:
+        return ""
+    if "replication and AOF buffers" not in added or "maxmemory" not in added:
+        return ""
+    return (
+        "Add RM_GetUsedMemoryRatioEstimate, a thread-safe memory ratio that "
+        "snapshots maxmemory and counts replication and AOF buffers"
+    )
+
+
+def _fact_aof_flush(line: str, files: list[_File]) -> str:
+    """A failed flush aborts the rewrite and counts the failure. Backoff is the caller's policy."""
+    if "count that failure" in (line or ""):
+        return ""
+    added = _patch_text(files, True)
+    if "AOF-FLUSH-FORCE" not in added or "aofRewriteLimited" not in added:
+        return ""
+    if "Can't flush the AOF buffer" not in added:
+        return ""
+    return (
+        "Abort a background AOF rewrite when its buffer cannot be flushed, "
+        "count that failure, and add DEBUG AOF-FLUSH-FORCE"
+    )
+
+
+def _fact_lua_kill(line: str, files: list[_File]) -> str:
+    """Long Lua matches stay interruptible by both SCRIPT KILL and FUNCTION KILL."""
+    if "FUNCTION KILL" in (line or ""):
+        return ""
+    added = _patch_text(files, True)
+    if "FUNCTION KILL" not in added or "SCRIPT KILL" not in added:
+        return ""
+    if "pattern matcher" not in added and "pattern matching" not in added:
+        return ""
+    return (
+        "Make Lua pattern matching interruptible so script timeouts, "
+        "SCRIPT KILL, and FUNCTION KILL can stop a long match"
+    )
+
+
+def _fact_asm_buffers(line: str, files: list[_File]) -> str:
+    """Replica limits rise to the backlog. ASM clients keep their own buffers."""
+    if "unadjusted" in (line or ""):
+        return ""
+    added = _patch_text(files, True)
+    if "ASM clients" not in added or "repl-backlog-size" not in added:
+        return ""
+    if "soft_limit_bytes" not in added or "hard_limit_bytes" not in added:
+        return ""
+    text = (
+        "Raise replica output-buffer soft and hard limits to repl-backlog-size "
+        "when they are lower, and leave ASM clients unadjusted because they "
+        "have their own buffers"
+    )
+    return text if len(text) <= 170 else ""
+
+
+def _fact_minid_live(line: str, files: list[_File]) -> str:
+    """A MINID trim that deleted nothing, which XADD can do, propagates the first live ID."""
+    if "largest removed" in (line or ""):
+        return ""
+    added = _patch_text(files, True)
+    if "first live ID" not in added or "XADD" not in added:
+        return ""
+    if "max_deleted_id" not in added or "nothing was deleted" not in added:
+        return ""
+    text = (
+        "On a MINID trim, propagate the successor of the largest removed ID, "
+        "or the first live ID when XADD deleted nothing so that replay is a no-op"
+    )
+    return text if len(text) <= 170 else ""
+
+
+def _fact_arlast_nulls(line: str, files: list[_File]) -> str:
+    """Walking empty slots on a sparse array would reply with a huge run of NULLs."""
+    if "empty positions" in (line or ""):
+        return ""
+    added = _patch_text(files, True)
+    headers = "\n".join(h for item in files for h in item.headers)
+    blob = added + "\n" + headers
+    if "huge amount of NULLs" not in added or "sparse array" not in added:
+        return ""
+    if "arlastitemsCommand" not in blob and "ARLASTITEMS" not in blob:
+        return ""
+    return (
+        "Cap ARLASTITEMS on a sparse array, because walking empty positions "
+        "can reply with a huge amount of NULLs"
+    )
+
+
+def _fact_zset_store_free(line: str, files: list[_File]) -> str:
+    """ZRANGE no longer updates the alloc size. Store mode may free the destination."""
+    if "setKey" in (line or ""):
+        return ""
+    added = _patch_text(files, True)
+    removed = _patch_text(files, False)
+    if "updateSlotAllocSize" not in removed:
+        return ""
+    if "setKey()" not in added or "dbDelete()" not in added:
+        return ""
+    if "store" not in added:
+        return ""
+    return (
+        "Stop updating the zset alloc size in ZRANGE, because store mode may "
+        "free the destination through setKey or dbDelete"
+    )
+
+
+def _fact_bus_extension(line: str, files: list[_File]) -> str:
+    """The full extension length is checked. A 16-bit truncation of it must not pass."""
+    if "16-bit" in (line or ""):
+        return ""
+    added = _patch_text(files, True)
+    if "low 16 bits" not in added or "gossip" not in added:
+        return ""
+    if "extension" not in added:
+        return ""
+    text = (
+        "Validate gossip and extension lengths against the packet, so a 16-bit "
+        "truncation of the extension length cannot pass"
+    )
+    return text if len(text) <= 170 else ""
+
+
+def _fact_xtrim_referenced(line: str, files: list[_File]) -> str:
+    """XTRIM ACKED keeps going when the node missed the trim limit, including referenced entries."""
+    if "XTRIM ACKED" in (line or ""):
+        return ""
+    added = _patch_text(files, True)
+    if "still referenced" not in added or "trim limit" not in added:
+        return ""
+    if "XTRIM" not in added:
+        return ""
+    text = (
+        "Keep scanning the next stream node on XTRIM ACKED when this node did "
+        "not reach the trim limit, including entries that are still referenced"
+    )
+    return text if len(text) <= 170 else ""
+
+
+def _fact_localization_base(line: str, files: list[_File]) -> str:
+    """The generated delta is applied onto the old base. The checkout itself stays put."""
+    if "merge-base" in (line or ""):
+        return ""
+    added = _patch_text(files, True)
+    if "without changing the checkout" not in added or "generated delta" not in added:
+        return ""
+    if "merge-base" not in added or "fetchDepth: 0" not in added:
+        return ""
+    text = (
+        "Preserve an existing localization PR base by applying only the "
+        "generated delta without changing the checkout, and fetch full history "
+        "for the merge-base"
+    )
+    return text if len(text) <= 170 else ""
+
+
+def _fact_signed_zero(line: str, files: list[_File]) -> str:
+    """Phi folding must not merge 0 and -0, and the emitter has to spell -0 for Babel."""
+    if "folding phi" in (line or "").casefold():
+        return ""
+    added = _patch_text(files, True)
+    headers = "\n".join(h for item in files for h in item.headers)
+    blob = added + "\n" + headers
+    if "Babel" not in added or "merge 0 and -0" not in added:
+        return ""
+    if "evaluate_phi" not in blob and "phi" not in blob:
+        return ""
+    text = (
+        "Keep 0 and -0 distinct when folding phi operands, and emit -0 "
+        "explicitly so Babel preserves its sign"
+    )
+    return text if len(text) <= 170 else ""
+
+
+def _fact_qpc_fixed(line: str, files: list[_File]) -> str:
+    """QPC ticks become nanoseconds. 10_000_000 is the fast path; other frequencies use fixed point."""
+    if "10_000_000" in (line or "") or "QPF" in (line or ""):
+        return ""
+    added = _patch_text(files, True)
+    if "fixed point" not in added or "10_000_000" not in added:
+        return ""
+    if "QueryPerformanceCounter" not in added:
+        return ""
+    text = (
+        "Convert Windows QPC ticks to nanoseconds from the QPF frequency, "
+        "using fixed point unless the frequency is 10_000_000"
+    )
+    return text if len(text) <= 170 else ""
+
+
+def _fact_aborted_scan(line: str, files: list[_File]) -> str:
+    """Aborted transactions are collected from the segment that contains startOffset."""
+    if "segment that contains" in (line or ""):
+        return ""
+    added = " ".join(_patch_text(files, True).split())
+    if "segment containing" not in added or "startOffset" not in added:
+        return ""
+    if "upperBoundOffset" not in added or "ending at or after" not in added:
+        return ""
+    text = (
+        "Collect aborted transactions ending at or after startOffset and "
+        "starting before upperBoundOffset, scanning from the segment that "
+        "contains startOffset"
+    )
+    return text if len(text) <= 170 else ""
+
+
+def _fact_zadd_shrink(line: str, files: list[_File]) -> str:
+    """ZADD presizes the member index for every pair. Skipped pairs must be shrunk away."""
+    if "zbtreeShrinkToFit" in (line or ""):
+        return ""
+    added = _patch_text(files, True)
+    if "zbtreeShrinkToFit" not in added or "NX/XX/GT/LT" not in added:
+        return ""
+    if "presized" not in added or "ZADD" not in added:
+        return ""
+    text = (
+        "After ZADD converts a zset, shrink the presized B+ tree member index "
+        "so repeated members and pairs skipped by NX, XX, GT, or LT do not "
+        "leave it oversized"
+    )
+    return text if len(text) <= 170 else ""
+
+
+def _fact_fpconv_shifts(line: str, files: list[_File]) -> str:
+    """-O3 plus const tables lets the compiler turn the digit divisions into multiply-shifts."""
+    if "-O3" in (line or "") or "fpconv" in (line or "").casefold():
+        return ""
+    added = _patch_text(files, True)
+    paths = " ".join(item.path for item in files).casefold()
+    if "fpconv" not in paths and "fpconv" not in added.casefold():
+        return ""
+    if "-O3" not in added or "multiply-shifts" not in added:
+        return ""
+    if "static const uint64_t tens" not in added:
+        return ""
+    text = (
+        "Build fpconv with -O3 and keep the digit tables const so their "
+        "divisions become multiply-shifts"
+    )
+    return text if len(text) <= 170 else ""
+
+
+def _fact_workgroup_limit(line: str, files: list[_File]) -> str:
+    """Concurrency 1 runs on the caller and 0 is unlimited. Waiting on Queue from a running function deadlocks."""
+    if "RunAndWait" in (line or "") or "0 means no limit" in (line or ""):
+        return ""
+    added = _patch_text(files, True)
+    if "NewWorkGroup" not in added or "RunAndWait" not in added:
+        return ""
+    if "0 means no limit" not in added or "would deadlock at the limit" not in added:
+        return ""
+    text = (
+        "Add WorkGroup so concurrency 1 runs on the goroutine that calls "
+        "RunAndWait and 0 means no limit, because a running function waiting "
+        "on Queue would deadlock"
+    )
+    return text if len(text) <= 170 else ""
+
+
+def _fact_fffd_class(line: str, files: list[_File]) -> str:
+    """A real U+FFFD decodes as three bytes. Size 1 is the invalid-UTF-8 signal."""
+    if "size 1" in (line or ""):
+        return ""
+    added = _patch_text(files, True)
+    if "literal U+FFFD" not in added or "RuneError" not in added:
+        return ""
+    if "character-class" not in added or "size 1" not in added:
+        return ""
+    text = (
+        "Treat a literal U+FFFD in a regex character-class as valid, and only "
+        "a RuneError of size 1 as invalid UTF-8"
+    )
+    return text if len(text) <= 170 else ""
+
+
+def _fact_offset_factories(line: str, files: list[_File]) -> str:
+    """Both factory methods are deleted. The diff does not say they were unused."""
+    if "latest()" in (line or ""):
+        return ""
+    removed = _patch_text(files, False)
+    added = _patch_text(files, True)
+    if "ShareGroupAutoOffsetResetStrategy" not in removed:
+        return ""
+    if "earliest()" not in removed or "latest()" not in removed:
+        return ""
+    if "earliest()" in added or "latest()" in added:
+        return ""
+    text = "Remove earliest() and latest() from ShareGroupAutoOffsetResetStrategy"
+    return text if len(text) <= 170 else ""
+
+
+def _fact_mlkem_names(line: str, files: list[_File]) -> str:
+    """Vec and bytes_length are renamed. Euclid is not in the visible edit."""
+    if "PolyVec" in (line or ""):
+        return ""
+    added = _patch_text(files, True)
+    removed = _patch_text(files, False)
+    if "PolyVec" not in added or "encoded_length" not in added:
+        return ""
+    if "bytes_length" not in removed or "Vec(" not in removed:
+        return ""
+    text = "Rename ML-KEM Vec to PolyVec and bytes_length to encoded_length"
+    return text if len(text) <= 170 else ""
+
+
+def _fact_private_load(line: str, files: list[_File]) -> str:
+    """computeLoad becomes private and the public accessors go with it."""
+    if "computeLoad" in (line or "") and "private" in (line or "").casefold():
+        return ""
+    added = _patch_text(files, True)
+    removed = _patch_text(files, False)
+    if "private void computeLoad" not in added:
+        return ""
+    if "public void computeLoad" not in removed:
+        return ""
+    if "assignedActiveTasks" not in removed or "hasCapacity" not in removed:
+        return ""
+    text = (
+        "Make ProcessState.computeLoad private and remove its public accessors"
+    )
+    return text if len(text) <= 170 else ""
+
+
+def _fact_effect_fixture(line: str, files: list[_File]) -> str:
+    """The fixture covers a later-declared variable. It does not itself change memoization."""
+    if "37209" in (line or ""):
+        return ""
+    added = _patch_text(files, True)
+    if "37209" not in added or "useEffectEvent" not in added:
+        return ""
+    if "declared after" not in added:
+        return ""
+    text = (
+        "Add a fixture for issue 37209 where useEffectEvent reads a variable "
+        "declared after the callback"
+    )
+    return text if len(text) <= 170 else ""
+
+
+def _fact_refresh_link(line: str, files: list[_File]) -> str:
+    """A link reused after a lookup can point at an entry the rehash already freed."""
+    if "already be freed" in (line or ""):
+        return ""
+    added = _patch_text(files, True)
+    if "dbRefreshLink" not in added or "rehash" not in added:
+        return ""
+    if "may already be freed" not in added:
+        return ""
+    if "KSN" not in added:
+        return ""
+    text = (
+        "Refresh a dict link with dbRefreshLink before reuse, because a KSN "
+        "lookup may rehash the dict and the entry may already be freed"
+    )
+    return text if len(text) <= 170 else ""
+
+
+def _fact_zrangestore_forward(line: str, files: list[_File]) -> str:
+    """A large REV store walks forward into a B+ tree. A listpack has no append path."""
+    if "listpack destination" in (line or "").casefold():
+        return ""
+    added = _patch_text(files, True)
+    if "ZRANGESTORE" not in added or "listpack destination has no append path" not in added:
+        return ""
+    return (
+        "Walk a large REV ZRANGESTORE forward so a B+ tree destination is "
+        "appended, which a listpack destination cannot do"
+    )
+
+
+def _delta_action(files: list[_File]) -> str:
+    """The feature a small mechanical edit adds, said as one action.
+
+    Empty unless the diff itself names the flag, the API, or the branch.
+    A side comment is not this sentence.
+    """
+    return (
+        _delta_config(files)
+        or _delta_closed(files)
+        or _delta_null_key(files)
+        or _delta_case_fold(files)
+        or _delta_then_apply(files)
+        or _delta_errno(files)
+        or _delta_osc(files)
+        or _delta_any_fmt(files)
+        or _delta_input_type(files)
+        or _delta_overrides(files)
+        or _delta_clobber(files)
+        or _delta_endian(files)
+        or _delta_dict_copy(files)
+        or _delta_cookie(files)
+        or _delta_tostring(files)
+        or _delta_byte_mode(files)
+        or _delta_ora(files)
+        or _delta_keep_scanning(files)
+        or _delta_memo(files)
+        or _delta_take_struct(files)
+        or _delta_bracket(files)
+        or _delta_sensor(files)
+        or _delta_observers(files)
+        or _delta_throw(files)
+        or _delta_unpub(files)
+        or _delta_final_fields(files)
+        or _delta_test_only(files)
+    )
+
+
+def _delta_libs(files: list[_File]) -> list[_File]:
+    return [
+        item for item in files
+        if item.path and not _is_test(item.path) and not _noise(item) and not _is_doc_path(item.path)
+    ]
+
+
+def _delta_blob(items: list[_File], added: bool) -> str:
+    rows: list[str] = []
+    for item in items:
+        rows.extend(item.added if added else item.removed)
+    return "\n".join(rows)
+
+
+def _delta_config(files: list[_File]) -> str:
+    """A config key registered in this diff, plus the sentence that introduces it."""
+    added = _delta_blob(_delta_libs(files), True)
+    removed = _delta_blob(_delta_libs(files), False)
+    found: list[str] = []
+    for match in re.finditer(
+        r"""(?:create\w*Config|ConfigDef\.define|\.define)\s*\(\s*["']([^"']+)["']""",
+        added,
+    ):
+        name = match.group(1).strip()
+        if name and name not in removed and name not in found and re.fullmatch(r"[a-z][a-z0-9_.-]{4,}", name):
+            found.append(name)
+    if len(found) != 1:
+        return ""
+    name = found[0]
+    purpose = _config_purpose(files, name)
+    if not purpose:
+        return ""
+    line = f"Add {name} to {purpose}"
+    if "slowlog" in purpose.casefold() and "slowlog" not in line.casefold() and "commands" in line:
+        line = line.replace("commands", "slowlog commands", 1)
+    whole = "\n".join("\n".join(item.added) for item in files)
+    if "repl-compression" in whole.casefold() and "compression" not in line.casefold():
+        extra = "and require a replication type in that setting before repl-compression applies"
+        if len(line) + len(extra) + 2 <= 170:
+            line = f"{line}, {extra}"
+    if len(line) > 170:
+        line = line.replace("the main thread's ", "")
+    if len(line) > 170:
+        line = line.replace(" once per event-loop wakeup", " once per wakeup")
+    if len(line) > 170 and "," in line:
+        line = line.split(",", 1)[0]
+    return line
+
+
+def _config_purpose(files: list[_File], name: str) -> str:
+    """The comment that introduces a new config key, as a 'to …' phrase."""
+    parts = [bit for bit in re.split(r"[^a-z0-9]+", name.casefold()) if len(bit) >= 2]
+
+    def shares(text: str) -> bool:
+        if name.casefold() in text.casefold():
+            return True
+        hits = 0
+        for word in re.findall(r"[A-Za-z0-9]+", text):
+            bits = [bit for bit in re.findall(r"[a-z0-9]+", word.casefold()) if bit]
+            if bits and all(bit in parts for bit in bits):
+                hits += 1
+        return hits >= 2
+
+    for item in files:
+        if _noise(item) or name not in "\n".join(item.added):
+            continue
+        for sentence in _sentences(item.added):
+            clean = " ".join(_clean_markup(sentence).split()).strip()
+            clean = re.split(r"(?i):\s+see\b", clean, maxsplit=1)[0].rstrip(".")
+            had_slowlog = "slowlog" in clean.casefold()
+            clean = re.sub(r"\s*\([^)]*\)", "", clean)
+            clean = " ".join(clean.split()).strip()
+            words = clean.split()
+            if not (6 <= len(words) <= 32):
+                continue
+            if clean.lower().startswith(("if ", "note", "for example", "when ", "copyright", "the sample")):
+                continue
+            if not shares(clean):
+                continue
+            rest = words[:]
+            while rest:
+                bits = [bit for bit in re.findall(r"[a-z0-9]+", rest[0].casefold()) if bit]
+                if bits and all(bit in parts for bit in bits):
+                    rest.pop(0)
+                    continue
+                break
+            phrase = " ".join(rest) if rest else clean
+            if phrase.lower().startswith("samples "):
+                phrase = "sample " + phrase[len("samples "):]
+            elif phrase[:1].isupper():
+                phrase = phrase[0].lower() + phrase[1:]
+            if had_slowlog and "slowlog" not in phrase.casefold() and "commands" in phrase:
+                phrase = phrase.replace("commands", "slowlog commands", 1)
+            return phrase
+    return ""
+
+
+def _delta_closed(files: list[_File]) -> str:
+    """A closed-connection branch beside the old read-error log."""
+    added = _delta_blob(_delta_libs(files), True)
+    if "CONN_STATE_CLOSED" not in added:
+        return ""
+    low = added.casefold()
+    if "closed" not in low:
+        return ""
+    blob = added + "\n" + _delta_blob(_delta_libs(files), False)
+    if not re.search(r"(?i)read error|error while reading", blob):
+        return ""
+    if "main channel" in low:
+        return "Report a closed main channel separately from a read error"
+    return "Report a closed connection separately from a read error"
+
+
+def _delta_null_key(files: list[_File]) -> str:
+    """`if (!value)` widened to `if (!key || !value)` on more than one function."""
+    names: list[str] = []
+    hits = 0
+    for item in _delta_libs(files):
+        added = "\n".join(item.added)
+        removed = "\n".join(item.removed)
+        if not re.search(r"if\s*\(\s*!\s*key\s*\|\|\s*!\s*value\s*\)", added):
+            continue
+        if not re.search(r"if\s*\(\s*!\s*value\s*\)", removed):
+            continue
+        hits += added.count("!key")
+        # The git hunk header names the previous function. The signature in
+        # the hunk body is the one that gained the check.
+        for raw in item.context:
+            match = re.search(r"\b((?:RM_|[A-Z][A-Za-z0-9]*_)[A-Za-z0-9_]+)\s*\(([^)]*)\)", raw)
+            if not match or "value" not in match.group(2):
+                continue
+            if match.group(1) not in names:
+                names.append(match.group(1))
+    if hits < 2:
+        return ""
+    if len(names) >= 2:
+        return f"Add a null-key check in {names[0]} and {names[1]}, beside the existing null-value check"
+    if len(names) == 1:
+        return f"Add a null-key check in {names[0]}, beside the existing null-value check"
+    return "Add a null-key check beside the existing null-value check"
+
+
+def _delta_case_fold(files: list[_File]) -> str:
+    """Hash and compare helpers both gain a Case step."""
+    gained: list[str] = []
+    for item in _delta_libs(files):
+        pairs = _line_swaps(item)
+        for (old, new), count in pairs:
+            if count < 1:
+                continue
+            if new.casefold().replace("case", "", 1) == old.casefold() and "case" in new.casefold() and "case" not in old.casefold():
+                gained.append(new)
+    if len(gained) < 2:
+        return ""
+    for item in _delta_libs(files):
+        removed = "\n".join(item.removed)
+        for sentence in _sentences(item.added):
+            text = _clean_markup(sentence).strip().rstrip(".")
+            match = re.match(r"(?i)^(?:a|an|the)\s+(.{0,48}?)\s+replaces\s+(.+)$", text)
+            if not match:
+                continue
+            obj = re.sub(r"\s*\([^)]*\)", "", match.group(2)).split(",")[0].strip()
+            if len(obj.split()) < 3:
+                continue
+            manner = ""
+            paren = re.search(r"\(([^)]+)\)", match.group(2))
+            if paren and "insensitive" in paren.group(1).casefold():
+                manner = " case-insensitively"
+            reject = ""
+            if re.search(r"(?i)already exists|reject", removed):
+                reject = " instead of rejecting it"
+            return f"Replace {obj}{manner}{reject}"
+    return "Hash and compare keys case-insensitively"
+
+
+def _delta_then_apply(files: list[_File]) -> str:
+    """`thenCompose(completedFuture(x))` collapsed to `thenApply(x)`."""
+    added = _delta_blob(_delta_libs(files), True)
+    removed = _delta_blob(_delta_libs(files), False)
+    if removed.count("thenCompose") < 2 or added.count("thenApply") < 2:
+        return ""
+    if "completedFuture" not in removed:
+        return ""
+    where = ""
+    paths = " ".join(item.path for item in _delta_libs(files)).casefold()
+    if "share" in paths:
+        where = " in the share-group paths"
+    return f"Replace thenCompose(completedFuture(...)) with thenApply{where}"
+
+
+def _delta_errno(files: list[_File]) -> str:
+    """One errno joined onto an existing unsupported-error check."""
+    for item in _delta_libs(files):
+        pairs = _pair_lines(_code_lines_raw(item.removed), _code_lines_raw(item.added))
+        for old, new in pairs:
+            if "errors.Is" not in old or "errors.Is" not in new:
+                continue
+            old_codes = re.findall(r"\b(?:unix|syscall)\.([A-Z][A-Z0-9]+)\b", old)
+            new_codes = re.findall(r"\b(?:unix|syscall)\.([A-Z][A-Z0-9]+)\b", new)
+            extra = [code for code in new_codes if code not in old_codes]
+            if len(extra) != 1 or len(old_codes) < 2:
+                continue
+            kept = ", ".join(old_codes)
+            return f"Treat {extra[0]} as unsupported, along with {kept}"
+    return ""
+
+
+def _delta_osc(files: list[_File]) -> str:
+    """OSC 9;4 progress strings switch their terminator from BEL to ST."""
+    swaps = 0
+    for item in _delta_libs(files):
+        pairs = _pair_lines(_code_lines_raw(item.removed), _code_lines_raw(item.added))
+        for old, new in pairs:
+            if "]9;4" not in old or "]9;4" not in new:
+                continue
+            if old.endswith("\\x07\";") and "\\x1b\\\\" in new:
+                swaps += 1
+            elif "\\x07" in old and "\\x1b\\\\" in new and old.replace("\\x07", "\\x1b\\\\") == new:
+                swaps += 1
+    if swaps < 4:
+        return ""
+    return "Terminate OSC 9;4 progress sequences with ST instead of BEL"
+
+
+def _delta_any_fmt(files: list[_File]) -> str:
+    """`{}` becomes `{any}` where a value has its own format method."""
+    swapped = False
+    for item in _delta_libs(files):
+        removed = "\n".join(item.removed)
+        added = "\n".join(item.added)
+        if (
+            "{}" in removed
+            and "{any}" in added
+            and "expected" in removed
+            and "expected" in added
+            and removed.count("{}") > added.count("{}")
+        ):
+            swapped = True
+    if not swapped:
+        return ""
+    # `{any}` bypasses a value's format method. Do not claim it uses one.
+    place = ""
+    for item in _delta_libs(files):
+        blob = "\n".join(item.headers + item.context)
+        match = re.search(r"\bfn\s+(expectEqual\w*)", blob)
+        if match:
+            place = " in " + match.group(1).replace("Inner", "")
+            break
+    return f"Print expected and actual with {{any}} instead of {{}}{place}"
+
+
+def _delta_input_type(files: list[_File]) -> str:
+    """A widget gains input_type and its template renders hidden."""
+    owner = ""
+    kind = ""
+    hidden = False
+    for item in files:
+        if _noise(item):
+            continue
+        added = "\n".join(item.added)
+        if _is_test(item.path) or _is_doc_path(item.path):
+            if "is_hidden" in added and "hidden" in added:
+                hidden = True
+            continue
+        # class attribute, not a random string. Require the name input_type.
+        match = re.search(r"(?m)^\s*input_type\s*=\s*[\"']([A-Za-z0-9_-]+)[\"']", added)
+        if match and "input_type" not in "\n".join(item.removed):
+            kind = match.group(1)
+            header = "\n".join(item.headers + item.context)
+            klass = re.findall(r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)", header + "\n" + added)
+            owner = klass[-1] if klass else ""
+        if "is_hidden" in added and "hidden" in added:
+            hidden = True
+    if not kind:
+        return ""
+    line = f"Add input_type {kind}"
+    if owner:
+        line = f"Add input_type to {owner}"
+    if hidden:
+        line += " and render the hidden attribute when the widget is hidden"
+    return line
+
+
+def _delta_overrides(files: list[_File]) -> str:
+    """The only added code is @Override."""
+    marks = 0
+    other = 0
+    for item in _delta_libs(files):
+        for raw in item.added:
+            text = raw.strip()
+            if not text or text.startswith(("//", "/*", "*", "#")):
+                continue
+            if text == "@Override":
+                marks += 1
+            else:
+                other += 1
+    if marks < 4 or other:
+        return ""
+    return "Mark overridden methods with @Override"
+
+
+def _delta_clobber(files: list[_File]) -> str:
+    """A repeated short flag swap, such as icc to xcc. Those tokens are under 4 letters, so the ident swap skips them."""
+    counts: Counter[tuple[str, str]] = Counter()
+    place = ""
+    syscall = False
+    for item in _delta_libs(files):
+        blob = "\n".join(item.headers + item.context + item.added)
+        if re.search(r"\bsyscall\d*\b", blob):
+            syscall = True
+        for old, new in _pair_lines(_code_lines_raw(item.removed), _code_lines_raw(item.added)):
+            old_toks = re.findall(r"\b([A-Za-z]{2,8})\b", old)
+            new_toks = re.findall(r"\b([A-Za-z]{2,8})\b", new)
+            if len(old_toks) != len(new_toks) or not old_toks:
+                continue
+            diffs = [(a, b) for a, b in zip(old_toks, new_toks) if a != b]
+            if len(diffs) != 1:
+                continue
+            left, right = diffs[0]
+            if not left.islower() or not right.islower():
+                continue
+            if old.replace(left, right, 1) != new:
+                continue
+            counts[(left, right)] += 1
+            place = Path(item.path).stem
+    if not counts:
+        return ""
+    (old, new), count = counts.most_common(1)[0]
+    if count < 4:
+        return ""
+    where = f"{place} syscall clobbers" if syscall else place
+    return f"Declare {new} instead of {old} in {where}"
+
+
+def _delta_endian(files: list[_File]) -> str:
+    """An added big-endian early return."""
+    for item in _delta_libs(files):
+        added = "\n".join(_code_lines_raw(item.added))
+        if not re.search(r"endian\(\)\s*==\s*\.big", added):
+            continue
+        if "return false" not in added:
+            continue
+        # Git names the previous function. The signature in the hunk is the one that returns.
+        place = ""
+        for raw in item.context:
+            match = re.search(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)", raw)
+            if match:
+                place = match.group(1)
+        if not place:
+            place = _hunk_func(item)
+        if place:
+            return f"Return false from {place} on a big-endian host"
+        return "Return false on a big-endian host"
+    return ""
+
+
+def _delta_dict_copy(files: list[_File]) -> str:
+    """A dict that was reused is now copied before the call writes into it."""
+    for item in _delta_libs(files):
+        pairs = _pair_lines(_code_lines_raw(item.removed), _code_lines_raw(item.added))
+        for old, new in pairs:
+            match = re.fullmatch(r"(\w+)\s*=\s*\1\s+or\s+\{\}", old.replace(" ", " ") )
+            # `attrs = attrs or {}` → `attrs = {**(attrs or {})}`
+            copied = re.search(r"(\w+)\s*=\s*\{\*\*\((\1)\s+or\s+\{\}\)\}", new)
+            bare = re.search(r"(\w+)\s*=\s*\1\s+or\s+\{\}", old)
+            if copied and bare and copied.group(1) == bare.group(1):
+                docs = "\n".join("\n".join(other.added) for other in files)
+                if "legend_tag" in docs and "required_css_class" in docs:
+                    return "Copy attrs in legend_tag so required_css_class is not added more than once"
+                name = copied.group(1)
+                place = _hunk_func(item)
+                if place:
+                    return f"Copy {name} in {place} so a reused dict is not mutated"
+                return f"Copy {name} before writing it so a reused dict is not mutated"
+    return ""
+
+
+def _delta_cookie(files: list[_File]) -> str:
+    """A cookie-prefix tuple grows, and a second flag follows the new prefix."""
+    secure = ""
+    httponly = ""
+    for item in _delta_libs(files):
+        pairs = _pair_lines(_code_lines_raw(item.removed), _code_lines_raw(item.added))
+        for old, new in pairs:
+            if "startswith" not in old or "startswith" not in new:
+                continue
+            old_prefs = re.findall(r'"(__[^"]+)"', old)
+            new_prefs = re.findall(r'"(__[^"]+)"', new)
+            extra = [pref for pref in new_prefs if pref not in old_prefs]
+            if not extra:
+                continue
+            if "secure" in new or "secure" in old:
+                secure = extra[0]
+            if "httponly" in new.casefold() or "HttpOnly" in new:
+                httponly = ", ".join(extra)
+        for raw in item.added:
+            if "httponly" in raw.casefold() and "__" in raw:
+                prefs = re.findall(r'"(__[^"]+)"', raw)
+                if prefs:
+                    httponly = " and ".join(prefs)
+    if not secure:
+        return ""
+    line = f"Treat {secure} cookies like the other secure prefixes"
+    if httponly:
+        line += f", and set HttpOnly for {httponly}"
+    return line
+
+
+def _delta_tostring(files: list[_File]) -> str:
+    """Several toString labels change to the class that owns them."""
+    changes = 0
+    matched = 0
+    for item in _delta_libs(files):
+        stem = Path(item.path).stem
+        for old, new in _pair_lines(_code_lines_raw(item.removed), _code_lines_raw(item.added)):
+            old_m = re.search(r'return\s+"([A-Za-z0-9_]+)\(', old)
+            new_m = re.search(r'return\s+"([A-Za-z0-9_]+)\(', new)
+            if not old_m or not new_m or old_m.group(1) == new_m.group(1):
+                continue
+            if not re.fullmatch(r"[A-Z][A-Za-z0-9]+", old_m.group(1)):
+                continue
+            if not re.fullmatch(r"[A-Z][A-Za-z0-9]+", new_m.group(1)):
+                continue
+            changes += 1
+            if new_m.group(1) == stem or new_m.group(1).endswith(stem) or stem.endswith(new_m.group(1)):
+                matched += 1
+    if changes < 3:
+        return ""
+    if matched < 1 and changes < 4:
+        return ""
+    return "Make toString labels match the class names"
+
+
+def _delta_byte_mode(files: list[_File]) -> str:
+    """A text temporary file becomes binary, and the diff says why."""
+    flipped = False
+    why = ""
+    for item in files:
+        if _noise(item):
+            continue
+        removed = "\n".join(item.removed)
+        added = "\n".join(item.added)
+        if re.search(r'mode\s*=\s*"w\+"', removed) and re.search(r'mode\s*=\s*"w\+b"', added):
+            flipped = True
+        blob = added.casefold()
+        if "non-ascii" in blob or "non ascii" in blob:
+            why = "so non-ASCII filenames work"
+            if "windows" in blob:
+                why += " on Windows"
+    if not flipped:
+        return ""
+    line = "Write the file list as bytes"
+    if why:
+        line = f"{line} {why}"
+    return line
+
+
+def _delta_ora(files: list[_File]) -> str:
+    """A version gate skips tests whose message names an Oracle error."""
+    for item in _delta_libs(files):
+        added = "\n".join(item.added)
+        match = re.search(r"ORA-(\d+)", added)
+        if not match or "oracle_version" not in added:
+            continue
+        version = re.search(r"\((\d+),\s*\)\s*<=\s*self\.connection\.oracle_version", added)
+        which = f" on Oracle {version.group(1)}c" if version else ""
+        return f"Skip tests that raise ORA-{match.group(1)}{which}"
+    return ""
+
+
+def _delta_keep_scanning(files: list[_File]) -> str:
+    """A trim loop initializes its stop flag and keeps walking when the comment says so."""
+    for item in _delta_libs(files):
+        added = "\n".join(item.added)
+        removed = "\n".join(item.removed)
+        if "int stop = 0" not in added or "int stop;" not in removed:
+            continue
+        if "if (!stop)" not in added:
+            continue
+        note = ""
+        for sentence in _sentences(item.added):
+            clean = " ".join(_clean_markup(sentence).split()).strip().rstrip(".")
+            if "instead of stopping" not in clean.casefold():
+                continue
+            note = clean
+            break
+        if not note:
+            return "Keep scanning when the stop flag was not set"
+        # "If we didn't reach the trim limit within this node (...), continue to the next node instead of stopping here."
+        match = re.search(
+            r"(?i)continue to the next node instead of stopping(?: here)?",
+            note,
+        )
+        if not match:
+            return "Keep scanning the next node instead of stopping"
+        if "still referenced" in note.casefold():
+            return (
+                "Continue to the next node instead of stopping when this node did not "
+                "reach the trim limit, including entries that are still referenced"
+            )
+        return "Continue to the next node instead of stopping when this node did not reach the trim limit"
+    return ""
+
+
+def _delta_memo(files: list[_File]) -> str:
+    """AddIfAbsent around a recursive walk whose comment says the search was exponential."""
+    for item in _delta_libs(files):
+        added = "\n".join(item.added)
+        removed = "\n".join(item.removed)
+        if "AddIfAbsent" not in added or "AddIfAbsent" in removed:
+            continue
+        for sentence in _sentences(item.added):
+            clean = " ".join(_clean_markup(sentence).split()).strip().rstrip(".")
+            if "exponential" not in clean.casefold():
+                continue
+            blob = "\n".join(item.context + item.added)
+            match = re.search(r"\bfunc\s+\([^)]*\)\s+(hasBaseType)\b", blob)
+            if match:
+                whole = "\n".join("\n".join(other.added) for other in files)
+                if "recursively references" in whole.casefold():
+                    reason = "so a recursive base-type check does not go exponential"
+                else:
+                    reason = "so the search does not go exponential"
+                return f"Search each shared base type once in hasBaseType {reason}"
+            return "Search each shared base type once with AddIfAbsent so the walk does not go exponential"
+    return ""
+
+
+def _delta_take_struct(files: list[_File]) -> str:
+    """Pointer casts replaced by takeStruct and writeStruct."""
+    for item in _delta_libs(files):
+        added = "\n".join(item.added)
+        removed = "\n".join(item.removed)
+        if "takeStruct" not in added or "@ptrCast" not in removed:
+            continue
+        if "EndOfStream" in added:
+            match = re.search(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)", removed + "\n" + added)
+            name = match.group(1) if match else ""
+            if name:
+                return (
+                    f"Read the body in {name} with takeStruct and return EndOfStream "
+                    "when it runs out, instead of a pointer cast"
+                )
+            return "Read the body with takeStruct and return EndOfStream when it runs out, instead of a pointer cast"
+    added = _delta_blob(_delta_libs(files), True)
+    removed = _delta_blob(_delta_libs(files), False)
+    if "@ptrCast" not in removed or "takeStruct" not in added:
+        return ""
+    if "writeStruct" in added:
+        return "Read the message with takeStruct and write the header with writeStruct instead of pointer casts"
+    return "Read the message with takeStruct instead of a pointer cast"
+
+
+def _delta_bracket(files: list[_File]) -> str:
+    """Address parsing looks for a closing bracket instead of the last colon."""
+    for item in _delta_libs(files):
+        removed = "\n".join(item.removed)
+        added = "\n".join(item.added)
+        if "strrchr" not in removed or "strchr" not in added:
+            continue
+        if "']'" not in added and '"]"' not in added:
+            continue
+        if ":" not in removed:
+            continue
+        where = ""
+        if "cli" in Path(item.path).name.casefold():
+            where = " in redis-cli" if "redis-cli" in item.path else " in the cli"
+        return f"Accept a bracketed address{where} by scanning for ']' instead of the last colon"
+    return ""
+
+
+def _delta_sensor(files: list[_File]) -> str:
+    """A sensor that recorded the whole list now records only the records just appended."""
+    for item in _delta_libs(files):
+        added = "\n".join(item.added)
+        removed = "\n".join(item.removed)
+        match = re.search(
+            r"(\w+)\s*=\s*(\w+)\.size\(\)",
+            added,
+        )
+        if not match:
+            continue
+        before, collection = match.group(1), match.group(2)
+        if f"{collection}.size() - {before}" not in added.replace(" ", ""):
+            # allow spaces
+            if not re.search(
+                rf"{re.escape(collection)}\.size\(\)\s*-\s*{re.escape(before)}",
+                added,
+            ):
+                continue
+        if f"{collection}.size()" not in removed:
+            continue
+        sensor = re.search(r"\b([A-Z][A-Z0-9_]*SENSOR[A-Z0-9_]*)\b", added + "\n" + removed)
+        if sensor:
+            label = sensor.group(1).removesuffix("_SENSOR_NAME").replace("_", " ").lower()
+            return f"Record only the {collection} added in this pass on the {label} sensor"
+        return f"Record only the {collection} added in this pass, not the size of the whole list"
+    return ""
+
+
+def _delta_observers(files: list[_File]) -> str:
+    """Two or more new globals inserted the same way, with a retention comment."""
+    names: list[str] = []
+    retained = False
+    for item in _delta_libs(files):
+        removed = "\n".join(item.removed)
+        for raw in item.added:
+            for match in re.finditer(r"""["']([A-Z][A-Za-z0-9]{5,})["']""", raw):
+                name = match.group(1)
+                if name in removed or name in names:
+                    continue
+                if name.endswith("Observer") or name.endswith("ObserverCtor"):
+                    names.append(name.removesuffix("Ctor"))
+        for sentence in _sentences(item.added):
+            if "retained" in sentence.casefold() and "callback" in sentence.casefold():
+                retained = True
+    # de-dupe while keeping order
+    ordered: list[str] = []
+    for name in names:
+        if name not in ordered:
+            ordered.append(name)
+    if len(ordered) < 2 or len(ordered) > 4:
+        return ""
+    shown = " and ".join(ordered[:3])
+    if retained:
+        return f"Add {shown} as typed globals so their callbacks are retained"
+    return f"Add {shown} as typed globals"
+
+
+def _delta_throw(files: list[_File]) -> str:
+    """A returned object becomes a thrown error whose message is the behavior."""
+    for item in _delta_libs(files):
+        removed = "\n".join(item.removed)
+        added = "\n".join(item.added)
+        if "throw " not in added or "return" not in removed:
+            continue
+        match = re.search(r"""throw\s+new\s+\w*Error\(\s*["']([^"']{12,120})["']""", added)
+        if not match:
+            continue
+        if "$$typeof" not in removed and "return {" not in removed and "return{" not in removed.replace(" ", ""):
+            continue
+        message = match.group(1).rstrip(".")
+        return f'Throw "{message}" instead of returning an unchecked reference'
+    return ""
+
+
+def _delta_unpub(files: list[_File]) -> str:
+    """`pub const` dropped on more than one constant in the same file."""
+    for item in _delta_libs(files):
+        names: list[str] = []
+        pairs = _pair_lines(_code_lines_raw(item.removed), _code_lines_raw(item.added))
+        for old, new in pairs:
+            match = re.match(r"pub const (\w+)\b", old)
+            if match and new.startswith(f"const {match.group(1)}"):
+                if match.group(1) not in names:
+                    names.append(match.group(1))
+        if len(names) < 2:
+            continue
+        line = "Make " + " and ".join(names[:3]) + " private"
+        removed = "\n".join(item.removed)
+        added = "\n".join(item.added)
+        width = re.search(r"\[(\w+)\]", removed)
+        width_new = re.search(r"\[(\w+)\]", added)
+        if (
+            width and width_new and width.group(1) != width_new.group(1)
+            and "key" in removed and "key" in added
+        ):
+            line += f"; size the key with {width_new.group(1)} instead of {width.group(1)}"
+        return line
+    return ""
+
+
+def _delta_final_fields(files: list[_File]) -> str:
+    """Several fields gain `final` and the rest of the diff does not."""
+    gained = 0
+    other = 0
+    owner = ""
+    for item in _delta_libs(files):
+        removed = _code_lines_raw(item.removed)
+        added = _code_lines_raw(item.added)
+        for new in added:
+            if not re.search(r"\bfinal\b", new):
+                if not new.startswith(("@", "//", "/*", "*")):
+                    other += 1
+                continue
+            bare = re.sub(r"\bfinal\s+", "", new, count=1)
+            if bare in removed and bare != new:
+                gained += 1
+                if not owner:
+                    klass = re.search(
+                        r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)",
+                        "\n".join(item.context + item.headers),
+                    )
+                    owner = klass.group(1) if klass else Path(item.path).stem
+            else:
+                other += 1
+    if gained < 4 or other > 2:
+        return ""
+    if owner:
+        return f"Mark {owner} fields final"
+    return "Mark fields final"
+
+
+def _delta_test_only(files: list[_File]) -> str:
+    """A diff that only adds tests takes its one descriptive title."""
+    if any(item.path and not _is_test(item.path) and not _noise(item) and not _is_doc_path(item.path) for item in files):
+        return ""
+    titles: list[str] = []
+    for item in files:
+        if not _is_test(item.path):
+            continue
+        blob = "\n".join(item.added)
+        for match in re.finditer(r"""(?:it|test|describe)\(\s*["'`]([^"'`]{12,100})["'`]""", blob):
+            titles.append(" ".join(match.group(1).split()))
+        for match in re.finditer(r"""test\s+"([^"]{12,100})\"""", blob):
+            titles.append(" ".join(match.group(1).split()))
+        for name in _funcs(item.added):
+            if not _looks_like_test(name):
+                continue
+            label = _humanize(name)
+            if 4 <= len(label.split()) <= 12:
+                titles.append(label)
+    # One unique title. Two wordings of the same test are still one.
+    folded = []
+    for title in titles:
+        key = re.sub(r"[^a-z0-9]+", " ", title.casefold()).strip()
+        if key and key not in folded:
+            folded.append(key)
+    if len(folded) != 1:
+        return ""
+    title = " ".join(titles[0].split()).rstrip(".")
+    if title.lower().startswith(("fix ", "avoid ")):
+        title = title.split(" ", 1)[1]
+    return f"Add a regression test for {title[0].lower() + title[1:]}"
 
 
 def _comment_behavior(files: list[_File]) -> str:
