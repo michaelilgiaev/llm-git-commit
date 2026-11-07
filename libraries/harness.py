@@ -15,7 +15,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 _MAX_LINE = 360
-_PARSE_CAP = 40_000
+_PARSE_CAP = 160_000
 
 _STOP = {
     "and", "any", "are", "async", "await", "bool", "break", "byte", "bytes",
@@ -336,7 +336,16 @@ def _compose(files: list[_File], stat: str) -> str:
     clause = _sharpen(_mention_warning(_clause(primary, usable), usable), usable)
     if _weak_line(clause) and not _already_says_why(clause):
         better = _prefer_fact(_edit_fact(usable), _best_claim(usable))
-        if better:
+        # `Use from_fname instead of uri_from_fname` may take a real fact.
+        # `Build it only when…` is the comment's pronoun; the alt already names the noun.
+        head = clause.split(";", 1)[0].strip()
+        swap = re.match(r"^Use \S+ instead of \S+$", head) is not None
+        thin = bool(better and re.match(r"^(?:Build|Call)\s+it\b", better))
+        # "The terminal supports…" and "Get the line_terminator…" are the aside.
+        # A scored alt already names the change.
+        aside = bool(better and re.match(r"^(?:The |Get the )", better))
+        alt_wins = aside and any(score >= 27 for score, _text in _alt_candidates(usable))
+        if better and not (swap and thin) and not alt_wins:
             clause = better
     # "Added the help parameter" plus a new help section is the commit.
     # The new function's docstring is only how that section is written.
@@ -404,6 +413,10 @@ def _weak_line(text: str) -> bool:
 
 def _already_says_why(text: str) -> bool:
     """A weak opener that already carries the behavior stays as it is."""
+    head = (text or "").split(";", 1)[0].strip()
+    # `Use from_fname instead of uri_from_fname` names the helper, not the behavior.
+    if re.match(r"^Use \S+ instead of \S+$", head):
+        return False
     low = (text or "").casefold()
     return any(phrase in low for phrase in (" instead of ", " so ", " when ", " rather than "))
 
@@ -510,6 +523,13 @@ def _edit_fact(files: list[_File]) -> str:
         or _feature_literal(files)
         or _because_note(files)
         or _stated_effect(files)
+        or _let_can(files)
+        or _implements_fact(files)
+        or _small_type_list(files)
+        or _doc_verb(files)
+        or _new_func_doc(files)
+        or _deprecated_added(files)
+        or _plain_reason(files)
     )
 
 
@@ -1331,11 +1351,357 @@ def _because_note(files: list[_File]) -> str:
     return hit
 
 
+def _note_moved(sentence: str, removed: list[str]) -> bool:
+    """A comment that moved with a wording tweak is not a new fact."""
+    clean = _clean_markup(sentence).casefold().strip()
+    if not clean:
+        return False
+    for old in removed:
+        if not old:
+            continue
+        if clean == old:
+            return True
+        if len(clean) >= 20 and len(old) >= 20 and SequenceMatcher(None, clean, old).ratio() >= 0.75:
+            return True
+    return False
+
+
+def _removed_notes(item: _File) -> list[str]:
+    return [_clean_markup(one).casefold() for one in _sentences(item.removed)]
+
+
+def _let_can(files: list[_File]) -> str:
+    """'so UIs can connect' is the change. The new boolean next to it is not."""
+    found: list[str] = []
+    for item in files:
+        if _is_test(item.path) or _noise(item) or _is_doc_path(item.path):
+            continue
+        removed = _removed_notes(item)
+        for sentence in _sentences(item.added):
+            if _note_moved(sentence, removed):
+                continue
+            text = _clean_markup(sentence)
+            text = re.sub(r"https?://\S+", "", text)
+            text = " ".join(text.split()).strip().rstrip(".")
+            parts = re.split(r"(?i)\bso(?: that)?\b", text, maxsplit=1)
+            if len(parts) != 2:
+                continue
+            tail = re.split(r"(?i)\be\.g\b|\(", parts[1])[0].strip(" ,.")
+            can = re.match(r"(?i)^(.+?)\s+can\s+(.+)$", tail)
+            if not can:
+                continue
+            who, rest = can.group(1).strip(), can.group(2).strip(" ,.")
+            if not who or not (2 <= len(rest.split()) <= 14) or len(who.split()) > 4:
+                continue
+            # "so we can" is the author talking. "so the Python side can" is a side note.
+            if who.casefold() in {"we", "i", "you", "they", "it"} or who.casefold().startswith("the "):
+                continue
+            line = f"Let {who} {rest}"
+            head = re.sub(r"(?i)^@\w+\s+\S+\s+", "", parts[0]).strip(" ,.")
+            head = re.split(r"(?i)\be\.g\b|\(", head)[0].strip(" ,.")
+            if head and 4 <= len(head.split()) <= 14 and head.casefold() not in line.casefold():
+                cond = head[0].lower() + head[1:]
+                line = f"{line} when {cond}"
+            if 6 <= len(line.split()) <= 28:
+                found.append(line)
+    if len(found) != 1:
+        return ""
+    return found[0]
+
+
+def _implements_fact(files: list[_File]) -> str:
+    """'GetRef implements storage.GetRef' is the method the commit adds."""
+    found: list[str] = []
+    for item in files:
+        if _is_test(item.path) or _noise(item) or _is_doc_path(item.path):
+            continue
+        for sentence in _sentences(item.added):
+            text = _clean_markup(sentence).strip().rstrip(".")
+            match = re.match(
+                r"(?i)^[A-Za-z_]\w*\s+implements\s+([A-Za-z_][\w.]*)\s*$",
+                text,
+            )
+            if not match:
+                continue
+            found.append(match.group(1))
+    found = list(dict.fromkeys(found))
+    if len(found) != 1:
+        return ""
+    return f"Implement {found[0]}"
+
+
+def _list_label(item: _File) -> str:
+    """`isFunctionLikeNode` next to the new names, in plain words."""
+    blob = "\n".join(item.context + item.headers + [item.hunk or ""])
+    named = re.search(r"\b((?:is|has)[A-Z]\w+)", blob)
+    if not named:
+        return ""
+    label = re.sub(r"(?i)^(is|has)\s+", "", _humanize(named.group(1))).strip().lower()
+    if not label or label in _BORING or label in {"enum", "node", "type", "body", "name"}:
+        return ""
+    return label
+
+
+def _small_type_list(files: list[_File]) -> str:
+    """One or two quoted type names, and nothing else, name the case that was added."""
+    for item in files:
+        if _is_test(item.path) or _noise(item) or _is_doc_path(item.path):
+            continue
+        removed = "\n".join(item.removed)
+        names: list[str] = []
+        code = _code_lines_raw(item.added)
+        if not code or len(code) > 4:
+            continue
+        for raw in code:
+            match = re.fullmatch(r'"([A-Z][A-Za-z0-9]{5,})"', raw.strip().rstrip(","))
+            if not match:
+                continue
+            name = match.group(1)
+            if name in removed or name in names or not any(ch.islower() for ch in name):
+                continue
+            names.append(name)
+        if not 1 <= len(names) <= 2 or len(names) != len(code):
+            continue
+        label = _list_label(item)
+        if not label:
+            continue
+        if len(names) > 1 and not label.endswith("s"):
+            label += "s"
+        return f"Treat {_and(names)} as {label}"
+    return ""
+
+
+_DOC_VERB = {
+    "parses": "Parse", "clears": "Clear", "recovers": "Recover", "prints": "Print",
+    "encodes": "Encode", "decodes": "Decode", "converts": "Convert", "attaches": "Attach",
+    "stores": "Store", "sends": "Send", "emits": "Emit", "preserves": "Preserve",
+    "avoids": "Avoid", "restores": "Restore", "flushes": "Flush", "skips": "Skip",
+    "rejects": "Reject", "drops": "Drop", "keeps": "Keep", "closes": "Close",
+    "waits": "Wait", "publishes": "Publish", "forwards": "Forward",
+}
+
+
+def _doc_verb(files: list[_File]) -> str:
+    """A new doc sentence 'clearData clears … before …' is the behavior."""
+    found: list[str] = []
+    for item in files:
+        if _is_test(item.path) or _noise(item) or _is_doc_path(item.path):
+            continue
+        code_n = len(_code_lines_raw(item.added)) + len(_code_lines_raw(item.removed))
+        if code_n > 80:
+            continue
+        removed = _removed_notes(item)
+        for sentence in _sentences(item.added):
+            if _note_moved(sentence, removed):
+                continue
+            text = _clean_markup(sentence)
+            text = re.sub(r"https?://\S+", "", text)
+            text = re.split(r"(?i)\be\.g\b|\bfor example\b", text)[0]
+            text = " ".join(text.split()).strip().rstrip(".")
+            if text.lower().startswith(("@param", "@return", "@type", "copyright", "licensed")):
+                continue
+            words = text.split()
+            if not (6 <= len(words) <= 26):
+                continue
+            low = f" {text.casefold()} "
+            if not any(cue in low for cue in (" so ", " because ", " before ", " when ", " unless ", " instead ")):
+                continue
+            match = re.match(
+                r"(?i)^(?:[A-Za-z_]\w*\s+)?(" + "|".join(_DOC_VERB) + r")\s+(.+)$",
+                text,
+            )
+            if not match:
+                continue
+            verb = _DOC_VERB[match.group(1).lower()]
+            rest = match.group(2).strip().rstrip(".")
+            if len(rest.split()) < 4:
+                continue
+            found.append(f"{verb} {rest}")
+    found = list(dict.fromkeys(found))
+    if len(found) != 1:
+        return ""
+    line = found[0]
+    return line if 6 <= len(line.split()) <= 28 else ""
+
+
+def _new_func_doc(files: list[_File]) -> str:
+    """The lead doc on a new function, when it says what the function does."""
+    for item in files:
+        if _is_test(item.path) or _noise(item) or _is_doc_path(item.path):
+            continue
+        removed_names = set(_funcs(item.removed))
+        removed = _removed_notes(item)
+        for index, raw in enumerate(item.added):
+            name = _line_func_name(raw.strip())
+            if not name or name in removed_names or _tested(item, name):
+                continue
+            notes: list[str] = []
+            cursor = index - 1
+            while cursor >= 0:
+                text = item.added[cursor].strip()
+                if not text:
+                    # A blank line ends this comment. The previous function's doc stays there.
+                    if notes:
+                        break
+                    cursor -= 1
+                    continue
+                if text.startswith(("//", "#", "--", "/*", "*", "///")) and not _PREPROC.match(text):
+                    notes.append(item.added[cursor])
+                    cursor -= 1
+                    continue
+                break
+            if not notes:
+                continue
+            notes.reverse()
+            sentences = _sentences(notes)
+            if not sentences or _note_moved(sentences[0], removed):
+                continue
+            lead = _clean_markup(sentences[0]).strip().rstrip(".")
+            lead = re.split(r"(?i)\be\.g\b|\bfor example\b", lead)[0].strip(" ,")
+            words = lead.split()
+            if not (6 <= len(words) <= 22):
+                continue
+            parsed = re.match(r"(?i)^parses\s+(.+)$", lead)
+            if parsed:
+                return "Parse " + parsed.group(1).strip()
+            checks = re.match(r"(?i)^[A-Za-z_]\w*\s+checks\s+that\s+(.+)$", lead)
+            if checks and len(checks.group(1).split()) >= 4:
+                return "Check that " + checks.group(1).strip().rstrip(".")
+            match = re.match(
+                r"(?i)^(?:[A-Za-z_]\w*\s+)?(" + "|".join(_DOC_VERB) + r")\s+(.+)$",
+                lead,
+            )
+            if match and len(match.group(2).split()) >= 4:
+                return f"{_DOC_VERB[match.group(1).lower()]} {match.group(2).strip().rstrip('.')}"
+    return ""
+
+
+def _deprecated_added(files: list[_File]) -> str:
+    """'"rpcnotify()" function (DEPRECATED)' is the function this commit adds."""
+    names: list[str] = []
+    for item in files:
+        if Path(item.path).suffix.lower() not in {".c", ".h"}:
+            continue
+        blob = "\n".join(item.added)
+        for name in re.findall(
+            r'"([A-Za-z_][A-Za-z0-9_]*)\(\)"\s+function\s+\(DEPRECATED\)',
+            blob,
+        ):
+            if name not in names:
+                names.append(name)
+    if not names:
+        return ""
+    if len(names) == 1:
+        return f"Add the deprecated {names[0]} function"
+    return f"Add the deprecated {_and(names[:3])} functions"
+
+
+def _plain_reason(files: list[_File]) -> str:
+    """The one new comment on a small edit, when it says why."""
+    found: list[str] = []
+    for item in files:
+        if _is_test(item.path) or _noise(item) or _is_doc_path(item.path):
+            continue
+        code_n = len(_code_lines_raw(item.added)) + len(_code_lines_raw(item.removed))
+        if code_n > 36:
+            continue
+        removed = _removed_notes(item)
+        # `_sentences` splits on the period in "e.g.". Stitch that tail back.
+        stitched: list[str] = []
+        for sentence in _sentences(item.added):
+            if stitched and re.search(r"(?i)\be\.g\.\s*$", stitched[-1]):
+                stitched[-1] = stitched[-1] + " " + sentence
+            else:
+                stitched.append(sentence)
+        for sentence in stitched:
+            if _note_moved(sentence, removed):
+                continue
+            text = _clean_markup(sentence)
+            text = re.sub(r"https?://\S+", "", text)
+            text = " ".join(text.split()).strip().rstrip(".")
+            if text.lower().startswith(("@param", "@return", "@type", "copyright", "licensed", "todo", "note", "xxx", "fixme", "hack")):
+                continue
+            # A colon imperative may sit past the usual 28 words, after an "e.g." aside.
+            if not (8 <= len(text.split()) <= 40):
+                continue
+            low = f" {text.casefold()} "
+            # A sentence that opens with "So" is the tail of the previous note, not a new reason.
+            # "before" and "when" also sit on a side comment.
+            has_so = " so " in low[1:]
+            has_because = " because " in low
+            has_colon = ": " in text
+            if not (has_so or has_because or has_colon):
+                continue
+            # "…spans other rows: query its rows" is the change. The left side is why.
+            colon = re.match(r"(?i)^(.{12,220}?):\s*([a-z].+)$", text)
+            if colon:
+                left, right = colon.group(1).strip(), colon.group(2).strip().rstrip(".")
+                verb = right.split()[0].casefold().rstrip(",:;")
+                # "e.g. moved by …: query" is a fragment after the period in "e.g.".
+                if not left or (left[0].islower() and not left.casefold().startswith("this ")):
+                    continue
+                if verb in _OPEN | {"query", "parse", "clear", "recover", "send", "skip", "keep"} and 2 <= len(right.split()) <= 8:
+                    because = re.split(r"\((?i:e\.g\b)?", left)[0].strip(" ,")
+                    if 6 <= len(because.split()) <= 18:
+                        reason = because[0].lower() + because[1:]
+                        act = right[0].upper() + right[1:]
+                        found.append(f"{act}, because {reason}")
+                continue
+            # "We always…" is an essay beside the edit. The alt already says the change.
+            first = text.split()[0].casefold().rstrip(",:;")
+            if first in {"so", "we", "this", "it", "that", "here", "note", "if", "when", "there", "these", "those", "in", "broader", "unlike"}:
+                continue
+            if not (8 <= len(text.split()) <= 28):
+                continue
+            found.append(text)
+    if len(found) > 1:
+        # The same note on two call sites, with a different "so" tail, is one change.
+        rows = [text.split() for text in found]
+        prefix: list[str] = []
+        for bits in zip(*rows):
+            if len({bit.casefold() for bit in bits}) != 1:
+                break
+            prefix.append(bits[0])
+        while prefix and prefix[-1].casefold().rstrip(",") in {"so", "and", "because", "when"}:
+            prefix.pop()
+        if 8 <= len(prefix) <= 22:
+            found = [" ".join(prefix).rstrip(",")]
+        else:
+            return ""
+    if len(found) != 1:
+        return ""
+    text = found[0]
+    if text[0].islower():
+        text = text[0].upper() + text[1:]
+    return text if 8 <= len(text.split()) <= 28 else ""
+
+
 _C_DEF = re.compile(
     r"^(?:(?:static|inline|extern|const|unsigned|struct|enum|signed|volatile)\s+)*"
     r"(?:[A-Za-z_][A-Za-z0-9_]*\s*\*?\s+)+([A-Za-z_][A-Za-z0-9_]*)\s*\([^;]*$"
 )
 _C_SKIP = {"if", "for", "while", "switch", "return", "sizeof", "defined"}
+
+
+def _line_func_name(text: str) -> str:
+    """Function name on this line, including C, JS, and Lua definitions."""
+    match = _FUNC.match(text) or _SCRIPT_FUNC.match(text)
+    if match:
+        return match.group(1)
+    match = _C_DEF.match(text)
+    if match and match.group(1) not in _C_SKIP and match.group(1).casefold() not in _STOP:
+        return match.group(1)
+    return ""
+# JS `function name(` and Lua `function M.name(`. Python and Rust use def/fn.
+_SCRIPT_FUNC = re.compile(
+    r"^(?:export\s+)?(?:async\s+)?(?:local\s+)?function\s+"
+    r"(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)\s*\("
+)
+# `#include` and `#ifdef` are not comments. A Python `# if the buffer` is.
+_PREPROC = re.compile(
+    r"^#\s*(?:include\b|define\b|ifdef\b|ifndef\b|endif\b|pragma\b|undef\b|"
+    r"error\b|warning\b|line\b|elif\b|else\s*$|if\s+!?defined\b)"
+)
 
 
 def _c_extracted(files: list[_File]) -> str:
@@ -1441,6 +1807,9 @@ def _claim(sentence: str) -> str:
     text = _clean_markup(sentence or "").strip().rstrip(".")
     text = re.split(r"(?i)\bsuch as\b|\bfor example\b|\be\.g\.", text)[0].strip(" ,")
     if not text:
+        return ""
+    # Vim help (`|chansend()|`, `@deprecated`) is a manual page, not the change.
+    if "|" in text or "@deprecated" in text.casefold():
         return ""
     low = " " + text.casefold() + " "
     if any(bad in low for bad in _CLAIM_REJECT):
@@ -1550,7 +1919,9 @@ def _claim(sentence: str) -> str:
     starters = _OPEN | {
         "create", "collect", "hint", "report", "leave", "narrow", "derive",
         "advise", "cache", "reuse", "build", "fill", "attach", "collapse",
-        "route", "guard", "set", "size", "count",
+        "route", "guard", "set", "size", "count", "recover", "parse", "clear",
+        "encode", "decode", "print", "query", "send", "give", "record",
+        "let", "implement",
     }
     if first in starters:
         return _fit_claim(text[0].upper() + text[1:])
@@ -1751,6 +2122,7 @@ def _paste_head(head: str) -> bool:
         "return true if",
         "return a flag",
         "collect all of the",
+        "unlike ",
     ))
 
 
@@ -3398,9 +3770,10 @@ def _best_claim(files: list[_File]) -> str:
         if _noise(item) or _is_manifest(item.path):
             continue
         sentences = _sentences(item.added)
-        removed_notes = "\n".join(_clean_markup(one).casefold() for one in _sentences(item.removed))
+        removed_notes = "\n".join(_removed_notes(item))
         for index, sentence in enumerate(sentences):
-            # A comment that moved with the code is not the new behavior.
+            # A comment that moved unchanged is not the new behavior.
+            # A wording tweak can still be the change, so only an exact copy is skipped.
             if _clean_markup(sentence).casefold() in removed_notes:
                 continue
             prev = sentences[index - 1] if index else ""
@@ -5156,7 +5529,7 @@ def _code_lines_raw(lines: list[str]) -> list[str]:
     rows: list[str] = []
     for raw in lines:
         text = raw.strip()
-        if not text or text.startswith(("//", "#", "/*", "*", "\"\"\"", "'''")):
+        if not text or text.startswith(("//", "#", "--", "/*", "*", "\"\"\"", "'''")):
             continue
         if text.startswith(("import ", "from ", "package ", "use ")):
             continue
@@ -5230,8 +5603,7 @@ def _doc_after(item: _File, symbol: str) -> str:
     """The docstring or comment block sitting under a new function."""
     idx = None
     for i, raw in enumerate(item.added):
-        match = _FUNC.match(raw.strip())
-        if match and match.group(1) == symbol:
+        if _line_func_name(raw.strip()) == symbol:
             idx = i
             break
     if idx is None:
@@ -5382,7 +5754,7 @@ def _loose_sentences_from(lines: list[str]) -> list[str]:
     rows: list[str] = []
     for raw in lines:
         text = raw.strip()
-        if not text or text.startswith(("#", "//", "/*", "*", "\"\"\"", "'''", ".. ", ":")):
+        if not text or text.startswith(("#", "--", "//", "/*", "*", "\"\"\"", "'''", ".. ", ":")):
             continue
         if _codeish_line(text) or len(text.split()) < 3:
             continue
@@ -5400,7 +5772,15 @@ def _sentences(lines: list[str]) -> list[str]:
     chunks: list[str] = []
     buf: list[str] = []
     for raw in lines:
-        match = re.match(r"^(?://+|#+|/\*+|\*|\"\"\"|''')\s?(.*)", raw.strip())
+        stripped = raw.strip()
+        # A preprocessor line is code. Treating it as a comment glues it onto the doc.
+        if _PREPROC.match(stripped):
+            if buf:
+                chunks.append(" ".join(buf))
+                buf = []
+            continue
+        # `--` is a Lua comment. `//` and `#` stay what they were.
+        match = re.match(r"^(?://+|--+|#+|/\*+|\*|\"\"\"|''')\s?(.*)", stripped)
         if not match:
             if buf:
                 chunks.append(" ".join(buf))
@@ -5708,7 +6088,7 @@ def _code_lines(item: _File) -> list[str]:
     rows = []
     for raw in item.added:
         text = raw.strip()
-        if not text or text.startswith(("//", "#", "/*", "*", "import ", "from ", "package ", "use ")):
+        if not text or text.startswith(("//", "#", "--", "/*", "*", "import ", "from ", "package ", "use ")):
             continue
         if _FUNC.match(text):
             continue
@@ -5731,10 +6111,9 @@ def _names_in(lines: list[str]) -> set[str]:
 def _funcs(lines: list[str]) -> list[str]:
     found: list[str] = []
     for raw in lines:
-        match = _FUNC.match(raw.strip())
-        if not match:
+        name = _line_func_name(raw.strip())
+        if not name:
             continue
-        name = match.group(1)
         if name not in found and _keep_func(name):
             found.append(name)
     # A public name is the change a maintainer looks for. A leading underscore
@@ -5799,6 +6178,9 @@ def _locate(line: str, files: list[_File]) -> str:
 
 def _locate_one(line: str, files: list[_File]) -> str:
     if not line or _weak_line(line) or " in " in f" {line.casefold()} ":
+        return line
+    # "Implement storage.GetRef" already names the method. The hunk header is the neighbor.
+    if line.startswith("Implement "):
         return line
     code = [item for item in files if item.path and not _is_test(item.path) and not _noise(item)]
     primary = _primary(code) or _primary(files)

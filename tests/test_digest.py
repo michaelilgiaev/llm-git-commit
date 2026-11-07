@@ -766,6 +766,111 @@ diff --git a/eval.c b/eval.c
     assert text.startswith("Extract get_compare_type from eval4")
 
 
+def test_an_include_does_not_swallow_the_reason():
+    patch = """\
+diff --git a/ui.c b/ui.c
+--- a/ui.c
++++ b/ui.c
+@@ -1,3 +1,7 @@ void remote_ui_restart(String listen_addr)
++#include "nvim/msgpack_rpc/server.h"
++/// @param reuse_addr The new server reused the listen address, so UIs can connect via their stored addr.
++bool via_addr = reuse_addr && addr;
++if (via_addr) {
++  push_call(ui, "restart", args);
++}
+"""
+    text = digest.line("", patch)
+    assert "also check" not in text.casefold()
+    assert "connect" in text.casefold()
+    assert "include" not in text.casefold()
+
+
+def test_implements_names_the_interface():
+    patch = """\
+diff --git a/db.go b/db.go
+--- a/db.go
++++ b/db.go
+@@ -1,3 +1,6 @@ func (a *appender) Commit() error {
++// GetRef implements storage.GetRef.
++func (a *appenderBase) GetRef(lset labels.Labels) (storage.SeriesRef, labels.Labels) {
++    return 0, labels.EmptyLabels()
++}
+"""
+    text = digest.line("", patch)
+    assert text == "Implement storage.GetRef"
+
+
+def test_two_type_names_name_the_predicate():
+    patch = """\
+diff --git a/handle.js b/handle.js
+--- a/handle.js
++++ b/handle.js
+@@ -1,4 +1,6 @@ const isFunctionLikeNode = createTypeCheckFunction([
+   "ObjectMethod",
++  "ComponentDeclaration",
++  "HookDeclaration",
+ ]);
+"""
+    text = digest.line("", patch)
+    assert "ComponentDeclaration" in text
+    assert "HookDeclaration" in text
+    assert "function like" in text.casefold()
+    assert not text.startswith("Update ")
+
+
+def test_a_lua_doc_says_what_the_new_function_parses():
+    patch = """\
+diff --git a/uri.lua b/uri.lua
+--- a/uri.lua
++++ b/uri.lua
+@@ -1,2 +1,6 @@
++--- Parses a URI into its RFC 3986 components, without decoding them.
++---@return vim.Uri?
++function M.parse(uri)
++  return nil
++end
+"""
+    text = digest.line("", patch)
+    assert text.startswith("Parse a URI into its RFC 3986 components")
+    assert "also check" not in text.casefold()
+
+
+def test_deprecated_wrappers_are_named_once():
+    patch = """\
+diff --git a/deprecated.c b/deprecated.c
+--- a/deprecated.c
++++ b/deprecated.c
+@@ -1,2 +1,8 @@
++/// "rpcnotify()" function (DEPRECATED)
++void f_rpcnotify(typval_T *argvars, typval_T *rettv)
++{
++}
++/// "rpcrequest()" function (DEPRECATED)
++void f_rpcrequest(typval_T *argvars, typval_T *rettv)
++{
++}
+"""
+    text = digest.line("", patch)
+    assert text == "Add the deprecated rpcnotify and rpcrequest functions"
+
+
+def test_a_colon_note_says_to_query_the_spanned_rows():
+    patch = """\
+diff --git a/highlighter.lua b/highlighter.lua
+--- a/highlighter.lua
++++ b/highlighter.lua
+@@ -1,2 +1,8 @@ function M:on_win()
++  -- This row's query need not return the capture of a `conceal_lines` mark that spans other rows
++  -- (e.g. moved by `#offset!`, or shrunk by an edit there): query its rows.
++  local erow = mark.end_row or row
++  self.tree:parse({ row, erow + 1 })
+"""
+    text = digest.line("", patch)
+    assert text.startswith("Query its rows, because this row's query")
+    assert "conceal_lines" in text
+    assert "offset" not in text
+
+
 def test_pick_keeps_a_faithful_second_clause():
     import harness
     draft = "Restore tab stops if we have tab optimizations enabled"
