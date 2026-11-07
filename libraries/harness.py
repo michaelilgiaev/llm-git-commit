@@ -125,6 +125,18 @@ def _shipped(files: list[_File], stat: str) -> str:
     line = _glance(_locate(line, files))
     line = _name_callers(line, files)
     line = _widen(line, files)
+    # A widener keys off the weak head. Only fill in what is still an inventory.
+    # A return contract ("Return 1 if…") is the helper, not the commit.
+    replaceable = (_weak_line(line) and not _already_says_why(line)) or _return_contract(line)
+    if replaceable:
+        heard = _comment_behavior(files)
+        if heard and not _return_contract(heard):
+            line = _glance(heard)
+        elif _bare_inventory(line):
+            heard = _sole_note(files)
+            if heard:
+                line = _glance(heard)
+    line = _polish_voice(line)
     return _test_tail(line, files)
 
 
@@ -2737,6 +2749,7 @@ def _edit_fact(files: list[_File]) -> str:
         or _stricter_when_off(files)
         or _branched_literal(files)
         or _plain_reason(files)
+        or _defer_optional(files)
         or _inventory_behavior(files)
     )
 
@@ -3575,6 +3588,17 @@ def _almost_copied(clean: str, removed: list[str]) -> bool:
     return False
 
 
+def _note_extended(sentence: str, removed: list[str]) -> bool:
+    """A sentence that only grows an old note is not the new behavior."""
+    clean = _clean_markup(sentence).casefold().strip()
+    if len(clean) < 24:
+        return False
+    for old in removed:
+        if len(old) >= 20 and clean.startswith(old[:20]):
+            return True
+    return False
+
+
 def _note_moved(sentence: str, removed: list[str]) -> bool:
     """A comment that moved with a wording tweak is not a new fact."""
     clean = _clean_markup(sentence).casefold().strip()
@@ -4025,6 +4049,342 @@ def _inventory_behavior(files: list[_File]) -> str:
         or _imperative_note(files)
         or _single_test_title(files)
     )
+
+
+# A comment that opens with one of these is the behavior, not a side note.
+_COMMENT_VERBS = {
+    "accept", "align", "allow", "append", "avoid", "bind", "block", "call",
+    "cancel", "check", "clamp", "clear", "close", "compare", "convert",
+    "copy", "count", "decode", "delete", "deny", "disable", "distinguish",
+    "drop", "emit", "enable", "encode", "ensure", "escape", "exclude",
+    "fill", "filter", "flush", "forward", "free", "guard", "handle", "hide",
+    "ignore", "include", "insert", "keep", "limit", "load", "look", "make",
+    "match", "merge", "move", "normalize", "omit", "open", "parse", "pass",
+    "prefer", "preserve", "prevent", "quote", "raise", "read", "reject",
+    "reload", "remove", "rename", "replace", "require", "reset", "resolve",
+    "restore", "return", "sanitize", "send", "skip", "sort", "stop", "store",
+    "treat", "trim", "truncate", "unescape", "use", "validate", "wait",
+    "walk", "wrap", "write",
+}
+
+
+def _comment_behavior(files: list[_File]) -> str:
+    """One new comment that says the behavior, when every code pattern missed.
+
+    A large diff must mention a word that also appears in the code. Two
+    comments of the same strength are not a guess.
+    """
+    ranked: list[tuple[int, int, str]] = []
+    order = 0
+    for item in _library_files(files):
+        if _is_doc_path(item.path):
+            continue
+        name = Path(item.path).name
+        if re.search(r"(?i)(?:Test|Tests|TestCase)\.java$", name):
+            continue
+        if re.search(r"(?i)_tests?\.zig$", name):
+            continue
+        code = _code_lines_raw(item.added) + _code_lines_raw(item.removed)
+        code_blob = " ".join(code).casefold()
+        removed = _removed_notes(item)
+        stitched: list[str] = []
+        for sentence in _sentences(item.added):
+            if stitched and re.search(r"(?i)\be\.g\.\s*$", stitched[-1]):
+                stitched[-1] = stitched[-1] + " " + sentence
+            else:
+                stitched.append(sentence)
+        for sentence in stitched:
+            if _note_moved(sentence, removed):
+                continue
+            got = _behavior_sentence(sentence, code_blob, len(code))
+            if got:
+                ranked.append((got[0], order, got[1]))
+                order += 1
+    if not ranked:
+        return ""
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    best_score, _index, best = ranked[0]
+    if best_score < 10:
+        return ""
+    return _glance(best)
+
+
+def _behavior_sentence(sentence: str, code_blob: str, code_n: int) -> tuple[int, str] | None:
+    text = _clean_markup(sentence)
+    text = re.sub(r"https?://\S+", "", text)
+    # A trailing example is not the behavior. An example in front of "so" is.
+    if " so " not in text.casefold() and " because " not in text.casefold():
+        text = re.sub(r"(?i)\bsuch as\b.*$", "", text)
+    text = re.sub(r"\s*\([^)]{0,48}\)\.?\s*$", "", text)
+    # "…milliseconds: see the CPU time field" is a pointer, not more behavior.
+    text = re.split(r"(?i):\s+see\b", text, maxsplit=1)[0]
+    text = " ".join(text.split()).strip().rstrip(".")
+    if not text or "|" in text or "@" in text or "--" in text:
+        return None
+    lowered_head = text.casefold()
+    if text[0].islower() and "reports whether" not in lowered_head and "must not" not in lowered_head:
+        return None
+    if lowered_head.startswith(("if ", "while ", "because ", "since ")):
+        return None
+    if lowered_head.rstrip(".,").endswith((
+        " instead of", " rather than", " so", " because", " and", " or",
+    )):
+        return None
+    lowered = text.casefold()
+    if lowered.startswith((
+        "@", "copyright", "licensed", "todo", "note", "xxx", "fixme", "hack",
+        "example", "usage", "fixed ", "this ", "see ",
+    )):
+        return None
+    # `$` inside a character class is the byte, not a shell variable.
+    if _comment_noise(text):
+        return None
+    if not (8 <= len(text.split()) <= 40):
+        return None
+    # "must not modify them" points at a noun the comment never names.
+    if text.split()[-1].casefold().rstrip(".,;:") in {
+        "them", "it", "this", "that", "these", "those", "they", "him", "her",
+    }:
+        return None
+    low = f" {lowered} "
+    if any(bad in low for bad in (" todo ", " fixme ", " xxx ", " hack ")):
+        return None
+    if code_n > 40 and not _comment_grounded(text, code_blob):
+        return None
+    must = re.match(r"(?i)^(.+?) must not ([a-z][\w]*)\b(.*)$", text)
+    if must:
+        subj = must.group(1).strip()
+        verb = must.group(2)
+        rest = must.group(3).strip()
+        if subj.casefold() in {"we", "i", "you", "they", "it"}:
+            line = f"Do not {verb}"
+        else:
+            if subj.split()[0] in {"An", "A", "The"}:
+                subj = subj[0].lower() + subj[1:]
+            line = f"Do not let {subj} {verb}"
+        if rest:
+            line = f"{line} {rest}"
+        return 14, _cap(line).rstrip(".")
+    reported = re.search(r"(?i)\breports whether\s+(.+)$", text)
+    if reported:
+        return 12, _cap("Check whether " + reported.group(1)).rstrip(".")
+    score = 0
+    if " instead of " in low or " rather than " in low:
+        score = 12
+    elif " because " in low:
+        score = 11
+    elif " so " in low or re.search(r"\bto (?:report|keep|avoid|skip|prevent|stop)\b", low):
+        score = 10 if " so " in low else 12
+    else:
+        first = text.split()[0].casefold().rstrip(",:;")
+        if first not in _COMMENT_VERBS and first not in _OPEN:
+            return None
+        if code_n > 24 and not _comment_grounded(text, code_blob):
+            return None
+        if any(phrase in low for phrase in (" only ", " directly ", " without ")):
+            score = 11
+        else:
+            score = 9
+    if score < 10:
+        return None
+    if len(text) > 170:
+        shorter = re.sub(r"\s*\([^)]{0,40}\)", "", text)
+        shorter = " ".join(shorter.split()).strip().rstrip(".")
+        if 40 <= len(shorter) <= 170:
+            text = shorter
+    return score, _cap(text).rstrip(".")
+
+
+def _comment_grounded(text: str, code_blob: str) -> bool:
+    tokens = [
+        tok.casefold() for tok in _idents(text)
+        if len(tok) >= 5 and tok.casefold() not in _BORING
+    ]
+    return any(tok in code_blob for tok in tokens)
+
+
+def _comment_noise(text: str) -> bool:
+    """A path or a shell variable. A `$` inside `[A-Za-z0-9_$]` is neither."""
+    scrubbed = re.sub(r"\[[^\]]*\]", "", text)
+    if scrubbed.count("/") >= 2:
+        return True
+    return re.search(r"\$[A-Za-z_{]", scrubbed) is not None
+
+
+def _return_contract(text: str) -> bool:
+    """What a helper returns. The commit exists for the feature around it."""
+    head = (text or "").split(";", 1)[0].strip()
+    if re.match(r"^Return [0-9]+ if\b", head):
+        return True
+    if re.match(r"^Return a (?:number|string|pointer|value|bool)\b", head, re.I):
+        return True
+    if head.startswith("Size hint"):
+        return True
+    if re.match(r"^Fix \S+:", head):
+        return True
+    return False
+
+
+def _bare_inventory(text: str) -> bool:
+    """`Update name in file.py`, with no behavior words after the symbol."""
+    head = (text or "").split(";", 1)[0].strip()
+    if re.match(r"^Update \S+ in \S+\.\w+$", head):
+        return True
+    if re.match(r"^Update \S+\.\w+$", head):
+        return True
+    if re.match(r"^Also check \S+ in \S+\.\w+$", head):
+        return True
+    if re.match(r"^Add \S+ in \S+\.\w+$", head):
+        return True
+    if re.match(r"^Add \S+$", head):
+        return True
+    if re.match(r"^Use \S+$", head):
+        return True
+    if re.match(r"^Add tests?\b", head) and "regression" not in head.casefold():
+        return True
+    return False
+
+
+def _sole_note(files: list[_File]) -> str:
+    """The one new comment on a bare inventory line. Two comments are a guess."""
+    imperatives: list[str] = []
+    prose: list[str] = []
+    verbs = _COMMENT_VERBS | _OPEN | {"bound", "trim", "apply", "mark", "tag", "defer", "count"}
+    for item in _library_files(files):
+        if _is_doc_path(item.path):
+            continue
+        name = Path(item.path).name
+        if re.search(r"(?i)(?:Test|Tests|TestCase)\.java$", name):
+            continue
+        if re.search(r"(?i)_tests?\.zig$", name):
+            continue
+        code = _code_lines_raw(item.added) + _code_lines_raw(item.removed)
+        code_blob = " ".join(code).casefold()
+        code_n = len(code)
+        removed = _removed_notes(item)
+        stitched: list[str] = []
+        for sentence in _sentences(item.added):
+            if stitched and re.search(r"(?i)\be\.g\.\s*$", stitched[-1]):
+                stitched[-1] = stitched[-1] + " " + sentence
+            else:
+                stitched.append(sentence)
+        for sentence in stitched:
+            if _note_moved(sentence, removed):
+                continue
+            if _note_extended(sentence, removed):
+                continue
+            text = _clean_markup(sentence)
+            text = re.sub(r"<[^>]+>", " ", text)
+            text = re.sub(r"https?://\S+", "", text)
+            text = re.sub(r"\{@\w+\s+([^}]*)\}", r"\1", text)
+            text = re.sub(r"\s*\([^)]{0,48}\)\.?\s*$", "", text)
+            text = " ".join(text.split()).strip().rstrip(".")
+            words = text.split()
+            if not text or not text[0].isalpha() or not (8 <= len(words) <= 28):
+                continue
+            if "|" in text or "@" in text or "--" in text or "{" in text or ";" in text:
+                continue
+            if _comment_noise(text):
+                continue
+            if text[0].islower():
+                continue
+            low = text.casefold()
+            if low.startswith((
+                "copyright", "licensed", "todo", "fixme", "hack", "note", "xxx",
+                "example", "usage", "fixed ", "this ", "see ", "step ",
+                "otherwise", "however", "additionally", "moreover", "instead",
+                "also ", "then ", "and ", "but ", "for ", "if ", "when ",
+            )):
+                continue
+            if "e.g." in low or "for example" in low:
+                continue
+            if words[-1].casefold().rstrip(".,;:") in {
+                "them", "it", "this", "that", "these", "those", "they", "him", "her",
+            }:
+                continue
+            if any(
+                word[:1].isupper() and word.isalpha() and not word.isupper() and len(word) > 3
+                for word in words[1:]
+            ):
+                continue
+            if low.rstrip(".,").endswith((" instead of", " rather than", " so", " because", " and", " or")):
+                continue
+            if code_n > 40 and not _comment_grounded(text, code_blob):
+                continue
+            first = words[0].casefold().rstrip(",:;")
+            if first in verbs:
+                imperatives.append(_cap(text).rstrip("."))
+                continue
+            if any(phrase in f" {low} " for phrase in (" must ", " should ", " may not ", " is ", " are ")):
+                prose.append(_cap(text).rstrip("."))
+    if len(imperatives) == 1:
+        return imperatives[0]
+    if len(imperatives) == 0 and len(prose) == 1:
+        return prose[0]
+    return ""
+
+
+def _defer_optional(files: list[_File]) -> str:
+    """`.orElse(expr)` becoming `.orElseGet(() -> expr)` defers that fallback."""
+    if _strong_alt(files):
+        return ""
+    names: list[str] = []
+    for item in _library_files(files):
+        removed = "\n".join(_code_lines_raw(item.removed))
+        added = "\n".join(_code_lines_raw(item.added))
+        if ".orElseGet" not in added or ".orElse(" not in removed:
+            continue
+        if ".orElseGet" in removed:
+            continue
+        calls = re.findall(r"\(\)\s*->\s*([A-Za-z_][\w.]*)\s*\(", added)
+        calls = [call for call in calls if call.split(".")[-1] not in {"orElse", "orElseGet", "orElseThrow"}]
+        if len(set(calls)) == 1:
+            names.append(calls[0])
+        else:
+            names.append("")
+    if len(names) != 1:
+        return ""
+    shown = names[0]
+    leaf = shown.split(".")[-1] if shown else ""
+    generic = {"get", "set", "put", "add", "run", "call", "of", "map", "apply"}
+    if leaf.casefold() in generic and "." in shown:
+        label = shown
+    else:
+        label = leaf
+    if label and len(label) >= 3 and label.casefold() not in _BORING:
+        return f"Defer {label} so it runs only when the value is absent"
+    return "Defer the fallback so it runs only when the value is absent"
+
+
+def _polish_voice(line: str) -> str:
+    """A pasted third-person note reads as the comment, not the commit."""
+    if not line or "; " in line:
+        return line
+    swapped = {
+        "Does not": "Do not",
+        "Doesn't": "Do not",
+        "Returns": "Return",
+        "Supports": "Support",
+        "Checks": "Check",
+        "Rejects": "Reject",
+        "Skips": "Skip",
+        "Keeps": "Keep",
+        "Stops": "Stop",
+        "Allows": "Allow",
+        "Prevents": "Prevent",
+        "Ignores": "Ignore",
+        "Treats": "Treat",
+        "Avoids": "Avoid",
+        "Preserves": "Preserve",
+        "Removes": "Remove",
+        "Adds": "Add",
+        "Makes": "Make",
+        "Uses": "Use",
+    }
+    for old, new in swapped.items():
+        if line.startswith(old + " ") or line == old:
+            return new + line[len(old):]
+    return line
 
 
 def _wrapped_args(files: list[_File]) -> str:

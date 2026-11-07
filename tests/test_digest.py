@@ -1217,7 +1217,109 @@ diff --git a/tsdb/chunkenc/xor.go b/tsdb/chunkenc/xor.go
     text = digest.line("", patch)
     assert "reorder" in text.casefold()
     assert "scrape" in text.casefold()
+
+
+def test_a_must_not_comment_is_the_subject():
+    patch = """\
+diff --git a/django/utils/cache.py b/django/utils/cache.py
+--- a/django/utils/cache.py
++++ b/django/utils/cache.py
+@@ -10,6 +10,9 @@ def _generate_cache_key(request, headerlist):
++            # An absent field must not share a cache key with a field that is
++            # present but empty. Emit a marker that cannot collide.
++            ctx.update(b"-,")
+"""
+    text = digest.line("", patch)
+    assert text.startswith("Do not let an absent field share")
+    assert "empty" in text
+    assert not text.startswith("Update ")
+
+
+def test_a_rather_than_comment_names_the_behavior():
+    patch = """\
+diff --git a/utils/index.js b/utils/index.js
+--- a/utils/index.js
++++ b/utils/index.js
+@@ -1,4 +1,8 @@ function format(match, arg) {
+-        return arg;
++        if (escaped || args.length === 0) {
++          // Specifiers with no argument left stay literal, like the console, rather than becoming undefined.
++          return match;
++        }
+"""
+    text = digest.line("", patch)
+    assert "rather than" in text.casefold()
+    assert "literal" in text.casefold()
+    assert not text.startswith("Update ")
     assert "update" not in text.casefold()
+
+
+def test_a_dollar_in_a_character_class_keeps_the_comment():
+    patch = """\
+diff --git a/scanner.go b/scanner.go
+--- a/scanner.go
++++ b/scanner.go
+@@ -1,3 +1,6 @@ func charAndSize(s string) {
++    // isASCIIIdentifierPart reports whether a byte is [A-Za-z0-9_$], with one load instead of a chain of range checks.
++    if isASCIIIdentifierPart(b) {
++        return 1
++    }
+"""
+    text = digest.line("", patch)
+    assert "instead of" in text.casefold()
+    assert "range" in text.casefold()
+    assert not text.startswith("Update ")
+
+
+def test_one_comment_replaces_an_inventory_line():
+    patch = """\
+diff --git a/query_utils.py b/query_utils.py
+--- a/query_utils.py
++++ b/query_utils.py
+@@ -1,4 +1,7 @@ def refresh(self):
++        # FETCH_PEERS may not load the field if the instance's row was deleted after the queryset was evaluated.
++        if self.__dict__.get(field) is missing:
++            return
+"""
+    text = digest.line("", patch)
+    assert "deleted" in text.casefold()
+    assert not text.startswith("Also check")
+    assert not text.startswith("Update ")
+
+
+def test_a_feature_comment_beats_a_return_contract():
+    patch = """\
+diff --git a/slowlog.c b/slowlog.c
+--- a/slowlog.c
++++ b/slowlog.c
+@@ -1,6 +1,10 @@ void track(void) {
++    /* Off-CPU tracking samples the main thread CPU time once per wakeup, to report
++     * commands in the slowlog that were starved for at least 10 milliseconds. */
++    /* Return 1 if a command that took duration microseconds would be logged. */
++    if (sample_off_cpu())
++        slowlogPush(c);
+"""
+    text = digest.line("", patch)
+    assert "slowlog" in text.casefold() or "off-cpu" in text.casefold()
+    assert not text.startswith("Return 1")
+
+
+def test_orelseget_defers_the_fallback():
+    patch = """\
+diff --git a/StreamsGroup.java b/StreamsGroup.java
+--- a/StreamsGroup.java
++++ b/StreamsGroup.java
+@@ -1,4 +1,4 @@ class StreamsGroup {
+-                    .orElse(
+-                        topology.get(committedOffset)
++                    .orElseGet(
++                        () -> topology.get(committedOffset)
+                     )
+"""
+    text = digest.line("", patch)
+    assert text.startswith("Defer topology.get")
+    assert "absent" in text.casefold()
+    assert "orelse" not in text.casefold()
 
 
 def test_parentheses_stay_on_a_type_argument():
