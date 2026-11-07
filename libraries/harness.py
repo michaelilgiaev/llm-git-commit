@@ -116,7 +116,7 @@ def subject(stat: str, patch: str) -> str:
 
 def _shipped(files: list[_File], stat: str) -> str:
     """The line a commit uses. Tests and the fact card must share it."""
-    line = _promote(_compose(files, stat), files)
+    line = _qualify_method(_qualify_rename(_promote(_compose(files, stat), files), files), files)
     moved = _test_package_merge(stat)
     if moved and (_weak_line(line) or line.casefold().startswith("add tests")):
         line = moved
@@ -503,6 +503,12 @@ def _edit_fact(files: list[_File]) -> str:
         or _test_move(files)
         or _kept_open(files)
         or _so_fact(files)
+        or _cannot_fact(files)
+        or _use_so_not_harmed(files)
+        or _saved_buffer(files)
+        or _type_list(files)
+        or _feature_literal(files)
+        or _because_note(files)
         or _stated_effect(files)
     )
 
@@ -968,7 +974,7 @@ def _extracted(files: list[_File]) -> str:
         if effect:
             return _announce(name, effect)
         return f"Extract {name} from the surrounding function"
-    return ""
+    return _c_extracted(files)
 
 
 def _func_body(lines: list[str], name: str) -> list[str]:
@@ -1159,6 +1165,261 @@ def _so_fact(files: list[_File]) -> str:
     return best if best_score >= 10 else ""
 
 
+def _cannot_fact(files: list[_File]) -> str:
+    """'An X cannot Y, so Z' is the change. The new name in the condition is not."""
+    for item in files:
+        if _is_test(item.path) or _noise(item) or _is_doc_path(item.path):
+            continue
+        for sentence in _sentences(item.added):
+            text = re.sub(r"https?://\S+", "", _clean_markup(sentence))
+            text = " ".join(text.split()).strip(" ,").rstrip(".")
+            match = re.match(
+                r"(?i)^((?:an?|the)\s+.+?)\s+cannot\s+(.+?),\s+so\s+(.+)$",
+                text,
+            )
+            if match:
+                subject, limit, effect = (part.strip(" ,") for part in match.groups())
+                if not (4 <= len(effect.split()) <= 16) or not subject:
+                    continue
+                shown = subject[0].lower() + subject[1:]
+                line = f"{effect[0].upper()}{effect[1:]}, because {shown} cannot {limit}"
+                if 6 <= len(line.split()) <= 28:
+                    return line
+            but = re.match(
+                r"(?i)^((?:an?|the)?\s*[A-Za-z].+?)\s+cannot\s+(.+?),\s+but\s+(.+?)\s+can$",
+                text,
+            )
+            if not but:
+                continue
+            subject, limit, other = (part.strip(" ,.`") for part in but.groups())
+            if not subject or not (2 <= len(limit.split()) <= 10) or not (1 <= len(other.split()) <= 4):
+                continue
+            if subject[:1].isupper():
+                subject = subject[0].lower() + subject[1:]
+            return f"Allow {other} to {limit}, unlike {subject}"
+    return ""
+
+
+def _use_so_not_harmed(files: list[_File]) -> str:
+    """'hardline trims the whitespace, use literalline' names the replacement."""
+    harm = {"trims": "trimmed", "drops": "dropped", "strips": "stripped", "loses": "lost"}
+    for item in files:
+        if _is_test(item.path) or _noise(item) or _is_doc_path(item.path):
+            continue
+        added = "\n".join(item.added)
+        for sentence in _sentences(item.added):
+            text = _clean_markup(sentence)
+            match = re.search(
+                r"(?i)\b([A-Za-z_][A-Za-z0-9_]*)\s+(trims|drops|strips|loses)\s+"
+                r"((?:the |a )?.{3,50}?),\s*use\s+([A-Za-z_][A-Za-z0-9_]*)",
+                text,
+            )
+            if not match:
+                continue
+            _old, verb, what, tool = match.groups()
+            if tool not in added:
+                continue
+            what = " ".join(what.split()).rstrip(" ,.")
+            return f"Use {tool} so {what} is not {harm[verb.lower()]}"
+    return ""
+
+
+def _saved_buffer(files: list[_File]) -> str:
+    """A buffer copied aside and copied back is kept for the caller."""
+    for item in files:
+        if _is_test(item.path) or _noise(item):
+            continue
+        added = "\n".join(item.added)
+        match = re.search(r"memcpy\(\s*([A-Za-z_]\w*)\s*,\s*([A-Za-z_]\w*)\s*,", added)
+        if not match:
+            continue
+        dest, src = match.group(1), match.group(2)
+        if not re.search(rf"memcpy\(\s*{re.escape(src)}\s*,\s*{re.escape(dest)}\s*,", added):
+            continue
+        notes = " ".join(_sentences(item.added)).casefold()
+        if "still" not in notes:
+            continue
+        return f"Save {src} so the caller can still use it"
+    return ""
+
+
+def _type_list(files: list[_File]) -> str:
+    """Quoted type names added to one list are the cases this commit covers."""
+    for item in files:
+        if _is_test(item.path) or _noise(item) or _is_doc_path(item.path):
+            continue
+        removed = "\n".join(item.removed)
+        names: list[str] = []
+        for raw in item.added:
+            match = re.fullmatch(r'"([A-Z][A-Za-z0-9]{5,})"', raw.strip().rstrip(","))
+            if not match:
+                continue
+            name = match.group(1)
+            if name in removed or name in names or not any(ch.islower() for ch in name):
+                continue
+            names.append(name)
+        if len(names) < 3:
+            continue
+        blob = "\n".join(item.context + item.headers + item.added)
+        found = re.findall(r"\b([A-Za-z_][A-Za-z0-9_]{8,})\b[^\n]{0,80}\[", blob)
+        if not found:
+            continue
+        label = _humanize(found[-1]).lower()
+        return f"Treat {_and(names[:3])} as {label}"
+    return ""
+
+
+def _feature_literal(files: list[_File]) -> str:
+    """One new camelCase flag, with a test directory of the same name, is the feature."""
+    names: list[str] = []
+    for item in files:
+        if _is_test(item.path) or _noise(item) or _is_doc_path(item.path):
+            continue
+        removed = "\n".join(item.removed)
+        for raw in item.added:
+            match = re.fullmatch(
+                r"""["']([A-Za-z][a-z]+(?:[A-Z][A-Za-z0-9]+){1,})["']""",
+                raw.strip().rstrip(","),
+            )
+            if not match:
+                continue
+            name = match.group(1)
+            if len(name) < 8 or name in removed or name in names:
+                continue
+            names.append(name)
+    if len(names) != 1:
+        return ""
+    label = _humanize(names[0]).lower()
+    key = re.sub(r"[^a-z0-9]", "", label)
+    if not any(
+        re.sub(r"[^a-z0-9]", "", part.casefold()) == key
+        for item in files
+        if _is_test(item.path) and not item.removed
+        for part in Path(item.path).parts
+    ):
+        return ""
+    return f"Support {label} and cover it with tests"
+
+
+def _because_note(files: list[_File]) -> str:
+    """The one added reason, when the commit does not also add an essay."""
+    sentences: list[str] = []
+    hit = ""
+    for item in files:
+        if _is_test(item.path) or _noise(item) or _is_doc_path(item.path):
+            continue
+        for sentence in _sentences(item.added):
+            text = " ".join(_clean_markup(sentence).split()).strip().rstrip(".")
+            if len(text.split()) < 5:
+                continue
+            sentences.append(text)
+            if hit or " because " not in f" {text.casefold()} ":
+                continue
+            if not (8 <= len(text.split()) <= 22):
+                continue
+            folded = text.casefold()
+            if "http" in folded or folded.startswith(("todo", "note ", "fixme", "this ", "it ", "that ", "we ", "when ")):
+                continue
+            # A prose aside ("this is only needed") is not the change. A call or a path is.
+            if "(" not in text and not _named_in(text):
+                continue
+            hit = text.replace('"', "")
+            hit = " ".join(hit.split())
+            hit = hit[0].upper() + hit[1:]
+    if len(sentences) > 3 or not hit:
+        return ""
+    return hit
+
+
+_C_DEF = re.compile(
+    r"^(?:(?:static|inline|extern|const|unsigned|struct|enum|signed|volatile)\s+)*"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*\s*\*?\s+)+([A-Za-z_][A-Za-z0-9_]*)\s*\([^;]*$"
+)
+_C_SKIP = {"if", "for", "while", "switch", "return", "sizeof", "defined"}
+
+
+def _c_extracted(files: list[_File]) -> str:
+    """A C function whose body used to sit inline."""
+    fresh: list[tuple[_File, str]] = []
+    for item in files:
+        if _is_test(item.path) or _noise(item):
+            continue
+        if Path(item.path).suffix.lower() not in {".c", ".h", ".cc", ".cpp"}:
+            continue
+        removed_blob = "\n".join(item.removed)
+        # `len` and `*len` are the same statement moved into an out-parameter.
+        removed_norm = {_norm_code(line) for line in _code_lines_raw(item.removed)}
+        added = "\n".join(item.added)
+        for raw in item.added:
+            match = _C_DEF.match(raw.strip())
+            if not match:
+                continue
+            name = match.group(1)
+            if name in _C_SKIP or re.search(rf"\b{re.escape(name)}\b", removed_blob):
+                continue
+            if not re.search(rf"\b{re.escape(name)}\s*\(", added):
+                continue
+            body = _c_body(item.added, name)
+            if len(body) < 4:
+                continue
+            hit = sum(1 for line in body if _norm_code(line) in removed_norm)
+            if hit < max(3, int(len(body) * 0.55)):
+                continue
+            fresh.append((item, name))
+    names = list(dict.fromkeys(name for _, name in fresh))
+    if len(names) != 1:
+        return ""
+    name = names[0]
+    parent = _c_parent(fresh[0][0].added, name)
+    if parent and parent != name:
+        return f"Extract {name} from {parent}"
+    return f"Extract {name} from the surrounding function"
+
+
+def _norm_code(line: str) -> str:
+    return re.sub(r"\s+", "", line).replace("*", "")
+
+
+def _c_body(lines: list[str], name: str) -> list[str]:
+    start = None
+    sig = re.compile(rf"\b{re.escape(name)}\s*\(")
+    for index, raw in enumerate(lines):
+        if sig.search(raw) and not raw.strip().endswith(";"):
+            start = index + 1
+            break
+    if start is None:
+        return []
+    body: list[str] = []
+    for raw in lines[start:]:
+        text = raw.strip()
+        if text == "}" and body:
+            break
+        if _C_DEF.match(text) and not text.endswith(";"):
+            break
+        # `*len` is a dereference. `* comment` is a block-comment line.
+        if not text or text.startswith(("//", "/*", "#", "*/")) or text.startswith("* "):
+            continue
+        body.append(text)
+    return body
+
+
+def _c_parent(lines: list[str], name: str) -> str:
+    call = re.compile(rf"\b{re.escape(name)}\s*\(")
+    seen = False
+    last = ""
+    for raw in lines:
+        text = raw.strip()
+        match = _C_DEF.match(text)
+        if match and not text.endswith(";"):
+            if match.group(1) == name:
+                seen = True
+                continue
+            last = match.group(1)
+        if seen and call.search(text) and not (match and match.group(1) == name):
+            return last
+    return ""
+
+
 def _fit_claim(text: str) -> str:
     text = " ".join((text or "").split()).rstrip(".")
     # "… in terminals that don't support alt screen" restates the reason.
@@ -1276,6 +1537,16 @@ def _claim(sentence: str) -> str:
     if len(words) < 6 or len(words) > 32:
         return ""
     first = words[0].casefold().rstrip(",:;")
+    # "Sends a restart event to all UIs" is the change. C and Go write it that way.
+    action = {
+        "sends": "Send", "emits": "Emit", "stores": "Store", "reconnects": "Reconnect",
+        "preserves": "Preserve", "applies": "Apply", "waits": "Wait", "clears": "Clear",
+        "publishes": "Publish", "forwards": "Forward", "flushes": "Flush",
+        "restores": "Restore", "avoids": "Avoid",
+    }
+    if first in action and 6 <= len(words) <= 24:
+        rest = " ".join(words[1:]).rstrip(".")
+        return _fit_claim(f"{action[first]} {rest}")
     starters = _OPEN | {
         "create", "collect", "hint", "report", "leave", "narrow", "derive",
         "advise", "cache", "reuse", "build", "fill", "attach", "collapse",
@@ -1451,6 +1722,17 @@ def _should_promote(line: str, alt: str, score: int) -> bool:
     # "Add ModeReportMsg to represent a mode report" repeats the type's docstring.
     if score >= 34 and " to represent " in low:
         return True
+    # "Leave the status in place" is a side comment when the commit adds the feature.
+    if score >= 33 and low.startswith("leave the "):
+        return True
+    # "Reject out-of-range values" names no type. An alt that names one may replace it.
+    if (
+        score >= 30
+        and not _named_in(head)
+        and _named_in(alt)
+        and any(phrase in low for phrase in ("out-of-range", "out of range"))
+    ):
+        return True
     return False
 
 
@@ -1468,6 +1750,7 @@ def _paste_head(head: str) -> bool:
         "return the final component",
         "return true if",
         "return a flag",
+        "collect all of the",
     ))
 
 
@@ -1510,6 +1793,11 @@ def _alt_candidates(files: list[_File]) -> list[tuple[int, str]]:
         _alt_tutorial_view, _alt_compositor, _alt_textarea_value, _alt_view_options,
         _alt_documented_section, _alt_demonstrative, _alt_close_cursor,
         _alt_race_lock, _alt_event_bump,
+        _alt_second_pair, _alt_only_change, _alt_ban_unsupported,
+        _alt_panic_quit, _alt_enable_and_reset, _alt_own_base,
+        _alt_drop_helper, _alt_split_tests, _alt_feature_family,
+        _alt_flag_regression, _alt_another_place, _alt_escape_case,
+        _alt_paren_case,
     ):
         text = builder(files)
         if not text:
@@ -1596,6 +1884,19 @@ _ALT_SCORE = {
     "_alt_close_cursor": 35,
     "_alt_race_lock": 34,
     "_alt_event_bump": 34,
+    "_alt_second_pair": 36,
+    "_alt_only_change": 34,
+    "_alt_ban_unsupported": 34,
+    "_alt_panic_quit": 34,
+    "_alt_enable_and_reset": 32,
+    "_alt_own_base": 32,
+    "_alt_drop_helper": 30,
+    "_alt_split_tests": 30,
+    "_alt_feature_family": 34,
+    "_alt_flag_regression": 28,
+    "_alt_another_place": 32,
+    "_alt_escape_case": 32,
+    "_alt_paren_case": 32,
 }
 
 
@@ -1765,6 +2066,191 @@ def _alt_event_bump(files: list[_File]) -> str:
     if bumped:
         line += "; bump ultraviolet to pick up the mode report event"
     return line
+
+
+def _alt_second_pair(files: list[_File]) -> str:
+    """`those outer brackets` is the comment. The types are the subject."""
+    for item in files:
+        notes = " ".join(text for one, text in _added_notes([item]) if one is item)
+        low = notes.casefold()
+        if "second pair" not in low or "instead of wrapping" not in low:
+            continue
+        types = re.search(
+            r"(?i)types like ([A-Z][A-Za-z0-9]+) and ([A-Z][A-Za-z0-9]+)",
+            notes,
+        )
+        if not types:
+            continue
+        return (
+            f"Stop doubling brackets in optional {types.group(1)} and "
+            f"{types.group(2)} metavars"
+        )
+    return ""
+
+
+def _alt_only_change(files: list[_File]) -> str:
+    """A flush that only changes the cursor still has to restore it."""
+    for _item, sentence in _added_notes(files):
+        match = re.search(
+            r"(?i)when the update is only a ([a-z][a-z ]{3,40}?change)",
+            sentence,
+        )
+        if not match:
+            continue
+        what = match.group(1).strip()
+        if what.endswith(" change"):
+            what = what[: -len(" change")].strip()
+        if not what or len(what.split()) > 4:
+            continue
+        return f"Restore {what} when that is the only change in a flush"
+    return ""
+
+
+def _alt_ban_unsupported(files: list[_File]) -> str:
+    """An error that a flag does not support a mode is the behavior, not the helper doc."""
+    added = _blob(_library_files(files))
+    match = re.search(r"does not support ([a-z][a-z0-9_-]{3,24})", added)
+    if not match:
+        return ""
+    notes = " ".join(text for _item, text in _added_notes(files)).casefold()
+    blob = (added + "\n" + notes).casefold()
+    if not any(word in blob for word in ("ban ", "not allowed", "disallow", "unsupported")):
+        return ""
+    thing = match.group(1)
+    line = f"Reject flags that do not support {thing} when it is enabled"
+    if any(_is_test(item.path) for item in files):
+        line += " and cover them with tests"
+    return line
+
+
+def _alt_panic_quit(files: list[_File]) -> str:
+    """Building workers first, and quitting if one panics, is the hang fix."""
+    added = _blob(_library_files(files))
+    if "panicking()" not in added or "quit_now" not in added:
+        return ""
+    notes = " ".join(text for _item, text in _added_notes(files)).casefold()
+    if "worker" not in notes and "worker" not in added.casefold():
+        return ""
+    if not any(word in notes for word in ("hang", "waiting indefinitely", "never hang")):
+        return ""
+    place = "parallel walker" if re.search(r"\bWalk", "\n".join(
+        header for item in files for header in item.headers
+    )) else "workers"
+    return (
+        f"Fix the {place} hang on panic by building workers before they start "
+        "and quitting when a worker panics"
+    )
+
+
+def _alt_enable_and_reset(files: list[_File]) -> str:
+    """A Set and a Reset of the same mode is enable-and-reset, not a new protocol."""
+    added = _blob(_library_files(files))
+    names: list[str] = []
+    for match in re.finditer(r"\bSet([A-Z][A-Za-z0-9]+)\b", added):
+        name = re.sub(r"\d+$", "", match.group(1))
+        if name and re.search(rf"\bReset{re.escape(name)}\d*\b", added) and name not in names:
+            names.append(name)
+    if len(names) != 1:
+        return ""
+    shown = names[0][0].lower() + names[0][1:]
+    notes = " ".join(text for _item, text in _added_notes(_library_files(files))).casefold()
+    if "kitty" in notes and any(word in notes for word in ("coexist", "alongside", "both can")):
+        return (
+            f"Enable {shown} alongside the Kitty keyboard protocol and reset it on close"
+        )
+    return f"Enable {shown} and reset it on close"
+
+
+def _alt_own_base(files: list[_File]) -> str:
+    """`must use each root's own base` is the rule. The inline test comment is not."""
+    for _item, sentence in _added_notes(files):
+        match = re.search(
+            r"(?i)(?:^|but\s+)(.+?)\s+must\s+(use\s+.+)$",
+            sentence.rstrip("."),
+        )
+        if not match:
+            continue
+        subject_text = match.group(1).strip()
+        action = match.group(2).strip().rstrip(".")
+        if " but " in subject_text.casefold():
+            subject_text = re.split(r"(?i)\s+but\s+", subject_text)[-1].strip()
+        if len(subject_text.split()) > 12 or len(action.split()) > 14:
+            continue
+        if not action.lower().startswith("use "):
+            continue
+        line = f"{action[0].upper()}{action[1:]} for {subject_text[0].lower()}{subject_text[1:]}"
+        if 8 <= len(line.split()) <= 28:
+            return line
+    return ""
+
+
+def _alt_drop_helper(files: list[_File]) -> str:
+    """The same helper deleted from several files is one removal, not one filename."""
+    if any(
+        _code_lines_raw(item.added)
+        for item in files
+        if not _noise(item) and not _is_manifest(item.path)
+    ):
+        return ""
+    removed: dict[str, list[str]] = {}
+    for item in files:
+        if _is_test(item.path) or _noise(item) or _is_manifest(item.path):
+            continue
+        for name in re.findall(
+            r"(?m)^[ \t]*(?:func|fn|def)\s+(?:\([^)\n]*\)\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+            "\n".join(item.removed),
+        ):
+            if len(name) < 2 or name.startswith("_") or _looks_like_test(name):
+                continue
+            if name.casefold() in {"func", "fn", "def", "int", "string", "bool"}:
+                continue
+            removed.setdefault(name, []).append(item.path)
+    multi = {name: paths for name, paths in removed.items() if len(paths) >= 2}
+    if len(multi) != 1:
+        return ""
+    name, paths = next(iter(multi.items()))
+    places: list[str] = []
+    for path in paths:
+        parts = Path(path).parts
+        lowered = [part.casefold() for part in parts]
+        if "examples" in lowered:
+            index = lowered.index("examples")
+            if index + 1 < len(parts) - 1:
+                places.append(f"{parts[index + 1]} example")
+            elif "examples" not in places:
+                places.append("the examples")
+        else:
+            places.append(Path(path).name)
+    places = list(dict.fromkeys(places))
+    if not places:
+        return ""
+    return f"Remove the {name} helper from {_and(places[:3])}"
+
+
+def _alt_split_tests(files: list[_File]) -> str:
+    """One test module split into several files names every destination."""
+    sources = []
+    dests = []
+    for item in files:
+        if not _is_test(item.path):
+            continue
+        added = _code_lines_raw(item.added)
+        removed = _code_lines_raw(item.removed)
+        if removed and not added:
+            sources.append(item)
+        elif added and not removed:
+            dests.append(item)
+    if len(sources) != 1 or len(dests) < 2:
+        return ""
+    parents = {str(Path(item.path).parent).replace("\\", "/") for item in dests}
+    if len(parents) != 1:
+        return ""
+    parent = parents.pop()
+    labels: list[str] = []
+    for item in dests:
+        stem = re.sub(r"^test_", "", Path(item.path).stem)
+        labels.append(stem.replace("_", " "))
+    return f"Move {_and(labels[:3])} tests into {parent}"
 
 
 def _alt_class_doc(files: list[_File]) -> str:
@@ -2206,11 +2692,21 @@ def _alt_instead_of(files: list[_File]) -> str:
         )
         if not match:
             continue
-        what = match.group(2).strip()
-        other = match.group(3).strip()
-        line = f"Compute it over {what} instead of {other}"
-        if 8 <= len(line.split()) <= 26:
-            return line
+        for _other_item, other in _added_notes(files):
+            like = re.match(r"(?i)^like\s+.{1,80}?,\s*but\s+(.+)$", other.rstrip("."))
+            if not like:
+                continue
+            rest = like.group(1).strip().rstrip(".")
+            if rest.casefold().startswith("uses "):
+                rest = "Use " + rest[len("uses "):]
+            elif rest.casefold().startswith("use "):
+                rest = rest[0].upper() + rest[1:]
+            else:
+                continue
+            if 8 <= len(rest.split()) <= 26:
+                return rest
+        # "Compute it" has no subject a maintainer can scan.
+        return ""
     return ""
 
 
@@ -2902,7 +3398,11 @@ def _best_claim(files: list[_File]) -> str:
         if _noise(item) or _is_manifest(item.path):
             continue
         sentences = _sentences(item.added)
+        removed_notes = "\n".join(_clean_markup(one).casefold() for one in _sentences(item.removed))
         for index, sentence in enumerate(sentences):
+            # A comment that moved with the code is not the new behavior.
+            if _clean_markup(sentence).casefold() in removed_notes:
+                continue
             prev = sentences[index - 1] if index else ""
             nxt = sentences[index + 1] if index + 1 < len(sentences) else ""
             later = " ".join(sentences[index + 1:index + 6])
@@ -2967,6 +3467,230 @@ def _notable_bump(files: list[_File]) -> str:
 
 def _comment_line(text: str) -> bool:
     return text.startswith(("//", "#", "/*", "*", "///", '"""', "'''", ".. "))
+
+
+def _named_in(text: str) -> bool:
+    """A code name, not an English word. `WindowSizeMsg` counts. `values` does not."""
+    return any(_symbolish(tok) and len(tok) >= 6 for tok in _idents(text or ""))
+
+
+def _qualify_rename(line: str, files: list[_File]) -> str:
+    """`Rename Layer to Content` does not say which type, or who else changed."""
+    match = re.match(
+        r"^Rename ([A-Za-z_][A-Za-z0-9_]*) to ([A-Za-z_][A-Za-z0-9_]*)$",
+        (line or "").strip(),
+    )
+    if not match:
+        return line
+    old, new = match.group(1), match.group(2)
+    owner = ""
+    for item in files:
+        removed = "\n".join(item.removed)
+        added = "\n".join(item.added)
+        if not re.search(rf"(?m)^\s*{re.escape(old)}\b", removed):
+            continue
+        if not re.search(rf"(?m)^\s*{re.escape(new)}\b", added):
+            continue
+        for header in item.headers:
+            found = re.search(r"\b(?:type|struct|class)\s+([A-Z][A-Za-z0-9_]*)\b", header)
+            if found:
+                owner = found.group(1)
+                break
+        if owner:
+            break
+    if not owner:
+        return line
+    shown = f"Rename {owner}.{old} to {owner}.{new}"
+    areas: list[str] = []
+    for item in files:
+        path = item.path.replace("\\", "/")
+        if "/examples/" in f"/{path}" or path.startswith("examples/"):
+            if "examples" not in areas:
+                areas.append("examples")
+        elif "render" in Path(path).name.casefold() and "the renderer" not in areas:
+            areas.append("the renderer")
+    for item in files:
+        blob = "\n".join(item.added + item.removed + item.headers)
+        if re.search(r"\bSetContent\b", blob) and "SetContent" not in areas:
+            areas.append("SetContent")
+            break
+    if areas:
+        shown += " and update " + _and(areas[:3])
+    return shown
+
+
+def _alt_feature_family(files: list[_File]) -> str:
+    line = _feature_family(files)
+    if not line:
+        return ""
+    extra = _notable_bump(files)
+    if extra and extra.casefold() not in line.casefold():
+        line += "; " + extra[0].lower() + extra[1:]
+    return line
+
+
+def _qualify_method(line: str, files: list[_File]) -> str:
+    """Name the test type when the line only says the method."""
+    if not line or "::" in line:
+        return line
+    for item in files:
+        if not _is_test(item.path):
+            continue
+        owners: list[str] = []
+        fns: list[str] = []
+        for header in item.headers:
+            found = re.search(r"\bimpl(?:\s*<[^>\n]*>)?\s+([A-Z][A-Za-z0-9_]*)", header)
+            if found and found.group(1) not in owners:
+                owners.append(found.group(1))
+            fns.extend(re.findall(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^()\n]*>)?\s*\(", header))
+        blob = "\n".join(item.context + item.added + item.removed)
+        fns.extend(re.findall(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^()\n]*>)?\s*\(", blob))
+        fns = [name for name in dict.fromkeys(fns) if re.search(rf"\b{re.escape(name)}\b", line)]
+        if len(owners) == 1 and len(fns) == 1 and len(fns[0]) >= 5:
+            line = re.sub(rf"\b{re.escape(fns[0])}\b", f"{owners[0]}::{fns[0]}", line, count=1)
+            removed = "\n".join("\n".join(one.removed) for one in files)
+            if removed.count(".path().join(") >= 3 and ";" not in line:
+                line += " and simplify the call sites"
+            break
+    return line
+
+
+def _alt_flag_regression(files: list[_File]) -> str:
+    """A regression test's flags say more than the issue number."""
+    code = [
+        item for item in files
+        if not _is_test(item.path) and not _is_doc_path(item.path)
+        and not _noise(item) and not _is_manifest(item.path)
+        and (item.added or item.removed)
+    ]
+    if code:
+        return ""
+    generic = {
+        "--multiline", "--replace", "--color", "--heading", "--glob", "--type",
+        "--ignore-case", "--smart-case", "--fixed-strings", "--line-number",
+        "--filename", "--quiet", "--text", "--json", "--help", "--version",
+        "--debug", "--all",
+    }
+    flags: list[str] = []
+    blob = ""
+    for item in files:
+        if not _is_test(item.path):
+            continue
+        blob += "\n".join(item.added)
+        for raw in item.added:
+            for match in re.findall(r'"(--[a-z][a-z0-9-]{2,})', raw):
+                flag = match.split("=", 1)[0]
+                if flag.startswith("--no-") or flag in generic or flag in flags:
+                    continue
+                flags.append(flag)
+    if not (1 <= len(flags) <= 3):
+        return ""
+    nums = list(dict.fromkeys(re.findall(r"/issues/(\d+)", blob)))
+    covered = _and(flags)
+    if len(nums) == 1:
+        return f"Add a regression test for issue {nums[0]} covering {covered}"
+    return f"Add a regression test covering {covered}"
+
+
+def _alt_another_place(files: list[_File]) -> str:
+    """`may be in another tab page` plus a lookup replaces the current-tab assumption."""
+    for item, sentence in _added_notes(files):
+        if _is_test(item.path):
+            continue
+        match = re.search(r"(?i)may be in another ([a-z][a-z ]{2,40})", sentence.rstrip("."))
+        if not match:
+            continue
+        place = match.group(1).strip()
+        added = "\n".join(item.added)
+        removed = "\n".join(item.removed)
+        if not re.search(r"\bcur[A-Za-z_]*\b", removed):
+            continue
+        if not re.search(r"\b\w*find\w*\s*\(", added, re.I):
+            continue
+        return f"Look up the {place} instead of assuming the current one"
+    return ""
+
+
+def _alt_escape_case(files: list[_File]) -> str:
+    """A new name === "async" check next to a node type is the escape case."""
+    for item in _library_files(files):
+        added = "\n".join(item.added)
+        removed = "\n".join(item.removed)
+        name_re = re.compile(r"""name\s*===?\s*["']([A-Za-z_][A-Za-z0-9_]*)["']""")
+        type_re = re.compile(r"""type\s*===?\s*["']([A-Z][A-Za-z0-9]+)["']""")
+        names = [name for name in name_re.findall(added) if name not in name_re.findall(removed)]
+        types = [kind for kind in type_re.findall(added) if kind not in type_re.findall(removed)]
+        if not names or not types:
+            continue
+        home = (item.path + "\n" + "\n".join(item.headers)).casefold()
+        if "escape" not in home and "identifier" not in home:
+            continue
+        kind = types[0]
+        article = "an" if kind[:1].lower() in "aeiou" else "a"
+        return f"Escape {names[0]} when it is {article} {kind}"
+    return ""
+
+
+def _alt_paren_case(files: list[_File]) -> str:
+    """A new parentheses case, named from the test directory and the AST node."""
+    nodes: list[str] = []
+    for item in _library_files(files):
+        home = (item.path + "\n" + "\n".join(item.headers + item.context)).casefold()
+        if "parenthes" not in home:
+            continue
+        added = "\n".join(item.added)
+        removed = "\n".join(item.removed)
+        type_re = re.compile(r"""type\s*===?\s*["']([A-Z][A-Za-z0-9]+)["']""")
+        nodes.extend(
+            kind for kind in type_re.findall(added) if kind not in type_re.findall(removed)
+        )
+    if len(set(nodes)) != 1:
+        return ""
+    label = ""
+    for item in files:
+        if item.removed or not item.added or not _is_test(item.path):
+            continue
+        folder = Path(item.path).parent.name.replace("_", "-")
+        if folder.casefold() in {"test", "tests", "format", "src", "__tests__"}:
+            continue
+        if "-" not in folder and folder.casefold() == folder:
+            continue
+        label = folder.replace("-", " ")
+        break
+    node = re.sub(r"([a-z])([A-Z])", r"\1 \2", nodes[0]).lower()
+    article = "an" if (label or node)[:1].lower() in "aeiou" else "a"
+    if label:
+        return f"Parenthesize {article} {label} in a {node}"
+    return f"Parenthesize {article} {node}"
+
+
+def _feature_family(files: list[_File]) -> str:
+    """Several new types that share one name are the feature, not a side comment."""
+    names: list[str] = []
+    for item in _library_files(files):
+        for raw in item.added:
+            match = re.match(
+                r"(?:pub(?:\([^)]*\))?\s+)?(?:type|struct|class|func|fn)\s+"
+                r"([A-Z][A-Za-z0-9_]{8,})\b",
+                raw.strip(),
+            )
+            if match:
+                names.append(match.group(1))
+    if len(names) < 3:
+        return ""
+    best = ""
+    for name in names:
+        for end in range(len(name), 11, -1):
+            stem = name[:end]
+            if sum(other.startswith(stem) for other in names) >= 3 and len(stem) > len(best):
+                best = stem
+                break
+    if len(best) < 12:
+        return ""
+    removed = "\n".join("\n".join(item.removed) for item in _library_files(files))
+    if removed.count(best) >= 2:
+        return ""
+    return f"Add {_humanize(best).lower()} reporting"
 
 
 def _repo_story(files: list[_File]) -> str:
@@ -3235,9 +3959,42 @@ def _docs_only_story(files: list[_File]) -> str:
                 comments += 1
             else:
                 codeish += 1
-    if comments >= 3 and codeish == 0 and names:
+    if not (comments >= 3 and codeish == 0 and names):
+        return ""
+    calls: list[str] = []
+    saw_example = False
+    saw_convert = False
+    skip_calls = {"Sprintf", "Println", "Printf", "Errorf", "String", "Error"}
+    call_re = re.compile(
+        r"\b(?:[A-Za-z_][A-Za-z0-9_]*\.)?([A-Z][A-Za-z0-9_]{2,})\s*\("
+    )
+    for item in files:
+        if _noise(item) or _is_manifest(item.path):
+            continue
+        # The last call in a doc example is the function that example demonstrates.
+        groups = item.hunk_added or [("", item.added)]
+        for _header, lines in groups:
+            found_here: list[str] = []
+            for raw in lines:
+                text = raw.strip()
+                if re.search(r"(?i)\bexample\b|```", text):
+                    saw_example = True
+                if re.search(r"(?i)\bconvert", text):
+                    saw_convert = True
+                for found in call_re.finditer(text):
+                    name = found.group(1)
+                    if name not in skip_calls:
+                        found_here.append(name)
+            if found_here and found_here[-1] not in calls:
+                calls.append(found_here[-1])
+    if not calls:
         return "Update the docs in " + _and(list(dict.fromkeys(names))[:3])
-    return ""
+    line = "Document " + _and(calls[:3])
+    if saw_convert:
+        line += " conversion rules"
+    if saw_example:
+        line += " and add examples"
+    return line
 
 
 def _dep_name(files: list[_File]) -> str:
@@ -3719,7 +4476,7 @@ def _clause(item: _File, files: list[_File]) -> str:
 def _second_clause(primary: _File, files: list[_File], clause: str) -> str:
     """A second real behavior. A bare new helper name is not one."""
     for item in files:
-        if item is primary or _noise(item):
+        if item is primary or _noise(item) or _is_doc_path(item.path):
             continue
         if _is_test(item.path):
             extra = _substitution(item) or _literal_change(item)

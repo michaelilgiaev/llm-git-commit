@@ -581,6 +581,191 @@ def test_pick_rejects_an_update_step_down():
     assert harness.pick(weaker, draft, f"draft: {draft}\nfile: tea.go") == draft
 
 
+def test_doc_examples_name_the_function_they_demonstrate():
+    patch = """\
+diff --git a/tea.go b/tea.go
+--- a/tea.go
++++ b/tea.go
+@@ -1,3 +1,10 @@ type Hittable interface {
++// This function accepts any type and tries to convert it to a string.
++//
++// Example:
++//
++//	layer := lipgloss.NewLayer("Hello")
++//	v := tea.NewView(canvas)
+@@ -20,3 +27,8 @@ type KeyboardEnhancements struct {
++// Example:
++//
++//	v.SetContent(canvas)
+"""
+    text = digest.line("", patch)
+    assert "NewView" in text
+    assert "SetContent" in text
+    assert "Update the docs" not in text
+
+
+def test_a_helper_removed_from_two_files_names_both():
+    patch = """\
+diff --git a/examples/pager/main.go b/examples/pager/main.go
+--- a/examples/pager/main.go
++++ b/examples/pager/main.go
+@@ -1,6 +1,0 @@ func footerView() string {
+-func max(a, b int) int {
+-	if a > b {
+-		return a
+-	}
+-	return b
+-}
+diff --git a/examples/package-manager/main.go b/examples/package-manager/main.go
+--- a/examples/package-manager/main.go
++++ b/examples/package-manager/main.go
+@@ -1,6 +1,0 @@ func download() {
+-func max(a, b int) int {
+-	if a > b {
+-		return a
+-	}
+-	return b
+-}
+"""
+    text = digest.line("", patch)
+    assert "max" in text
+    assert "pager" in text
+    assert "package-manager" in text
+    assert "main.go" not in text
+
+
+def test_a_field_rename_names_the_type():
+    patch = """\
+diff --git a/tea.go b/tea.go
+--- a/tea.go
++++ b/tea.go
+@@ -1,8 +1,8 @@ type View struct {
+-	Layer any
++	Content any
+-	return v.Layer
++	return v.Content
+-	old := v.Layer
++	old := v.Content
+-	draw(v.Layer)
++	draw(v.Content)
+"""
+    text = digest.line("", patch)
+    assert text.startswith("Rename View.Layer to View.Content")
+
+
+def test_a_cannot_so_note_beats_also_check():
+    patch = '''\
+diff --git a/core.py b/core.py
+--- a/core.py
++++ b/core.py
+@@ -1,3 +1,5 @@ class Argument:
+     def get_help_record(self, ctx):
+-        return None
++        """An argument cannot be hidden, so an undocumented one still gets a row.
++        """
++        return (self.make_metavar(), self.help or "")
+'''
+    text = digest.line("", patch)
+    assert "cannot be hidden" in text.casefold()
+    assert "row" in text.casefold()
+    assert "also check" not in text.casefold()
+
+
+def test_new_type_names_in_a_list_name_the_list():
+    patch = """\
+diff --git a/overrides.js b/overrides.js
+--- a/overrides.js
++++ b/overrides.js
+@@ -1,3 +1,6 @@ const nodeTypesWithContentEnd = ([
++  "ClassProperty",
++  "PropertyDefinition",
++  "ClassPrivateProperty",
+   "ExpressionStatement",
+"""
+    text = digest.line("", patch)
+    assert text.startswith("Treat ClassProperty, PropertyDefinition, and ClassPrivateProperty")
+    assert "content end" in text.casefold()
+
+
+def test_a_third_person_note_beats_also_check():
+    patch = """\
+diff --git a/ui.c b/ui.c
+--- a/ui.c
++++ b/ui.c
+@@ -1,3 +1,6 @@ void ui_refresh(void)
++// Sends a restart event to all UIs when the address changes.
++if (via_addr && chan->addr) {
++  remote_ui_restart(addr, reuse_addr);
++}
+"""
+    text = digest.line("", patch)
+    assert "restart" in text.casefold()
+    assert "also check" not in text.casefold()
+
+
+def test_a_help_page_does_not_become_the_second_clause():
+    patch = """\
+diff --git a/ui.c b/ui.c
+--- a/ui.c
++++ b/ui.c
+@@ -1,3 +1,4 @@ void ui_refresh(void)
+-  if (ready)
++  if (ready || via_addr)
++    remote_ui_restart(addr, reuse_addr);
+diff --git a/api.txt b/api.txt
+--- a/api.txt
++++ b/api.txt
++The old server is about to exit and close its channel before the client attaches.
+"""
+    text = digest.line("", patch)
+    assert "document that" not in text.casefold()
+
+
+def test_use_the_call_that_does_not_trim():
+    patch = """\
+diff --git a/printer.js b/printer.js
+--- a/printer.js
++++ b/printer.js
+@@ -1,3 +1,5 @@ function print(node)
+-  return hardline;
++  // hardline trims the trailing whitespace of the block, use literalline
++  return literalline;
+"""
+    text = digest.line("", patch)
+    assert "literalline" in text
+    assert "not trimmed" in text.casefold()
+
+
+def test_a_moved_c_function_names_its_caller():
+    patch = """\
+diff --git a/eval.c b/eval.c
+--- a/eval.c
++++ b/eval.c
+@@ -1,8 +1,14 @@ static int eval4(char **arg, typval_T *rettv)
+-  int len = 2;
+-  switch (p[0]) {
+-  case '=':
+-    type = EXPR_EQUAL;
+-    break;
+-  }
++static exprtype_T get_compare_type(const char *p, int *len)
++{
++  int len = 2;
++  switch (p[0]) {
++  case '=':
++    type = EXPR_EQUAL;
++    break;
++  }
++  return type;
++}
++static int eval4(char **arg, typval_T *rettv)
++{
++  exprtype_T type = get_compare_type(p, &len);
+"""
+    text = digest.line("", patch)
+    assert text.startswith("Extract get_compare_type from eval4")
+
+
 def test_pick_keeps_a_faithful_second_clause():
     import harness
     draft = "Restore tab stops if we have tab optimizations enabled"
