@@ -7,10 +7,16 @@ RepoError via die); none print.
 
 from __future__ import annotations
 
+import os
 import subprocess
 
 import harness
 from checks import die
+
+# A diff that never returns (a smudge filter, a pager, a credential prompt)
+# used to freeze `git commit`. Reads fail instead. `git commit` itself waits,
+# so a hook the user configured can still finish.
+_GIT_TIMEOUT_S = 120
 
 # Docs and images stay out of the patch even when it is short. Their prose is
 # exactly what the model copies back as the subject. The stat line still names them.
@@ -26,9 +32,23 @@ _DOC_EXCLUDE = (
 )
 
 
-def _git(*args: str, check: bool = False) -> subprocess.CompletedProcess:
-    """Run `git <args>` capturing text output. With check=True a non-zero exit dies."""
-    res = subprocess.run(["git", *args], capture_output=True, text=True)
+def _git(*args: str, check: bool = False, timeout: float | None = _GIT_TIMEOUT_S,
+        ) -> subprocess.CompletedProcess:
+    """Run `git <args>` capturing text output. With check=True a non-zero exit dies.
+
+    `timeout` bounds a read. None waits, which is what `commit` uses so a
+    pre-commit hook is not killed.
+    """
+    env = os.environ.copy()
+    # Do not sit on a username prompt. Pass-through git (push, fetch) does not
+    # come through here, so those commands can still ask.
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    try:
+        res = subprocess.run(
+            ["git", *args], capture_output=True, text=True, env=env, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        die(f"git {' '.join(args)} timed out after {timeout}s")
     if check and res.returncode != 0:
         die(f"git {' '.join(args)} failed: {res.stderr.strip() or res.stdout.strip()}")
     return res
@@ -85,7 +105,7 @@ def _shape(stat: str, body: str) -> str:
 
 def commit(message: str) -> None:
     """Commit the ALREADY-staged changes with `message`. Dies on a git failure."""
-    _git("commit", "-m", message, check=True)
+    _git("commit", "-m", message, check=True, timeout=None)
 
 
 def head_has_commits() -> bool:

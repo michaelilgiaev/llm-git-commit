@@ -32,9 +32,14 @@ def require_git() -> None:
 def require_inside_work_tree() -> None:
     """Fail cleanly when not inside a git repository (a drop-in for git commit must)."""
     require_git()
-    res = subprocess.run(
-        ["git", "rev-parse", "--is-inside-work-tree"],
-        capture_output=True, text=True,
-    )
+    env = os.environ.copy()
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, env=env, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        die("git rev-parse timed out")
     if res.returncode != 0 or res.stdout.strip() != "true":
         die("not inside a git repository.")

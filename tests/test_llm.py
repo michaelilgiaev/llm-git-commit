@@ -140,3 +140,59 @@ def test_download_url_follows_configuration(monkeypatch):
     monkeypatch.setenv("LLM_GIT_COMMIT_REPO", "me/r")
     monkeypatch.setenv("LLM_GIT_COMMIT_FILE", "m.gguf")
     assert llm._download_url() == "https://huggingface.co/me/r/resolve/main/m.gguf"
+
+
+def test_stream_without_finish_stops_at_the_token_cap(monkeypatch):
+    """A generator that never sets finish_reason must not run forever."""
+    def endless():
+        while True:
+            yield {"choices": [{"delta": {"content": "A"}, "finish_reason": None}]}
+
+    class _Forever:
+        def create_chat_completion(self, **kw):
+            return endless()
+
+    monkeypatch.setattr(llm, "_load", lambda: _Forever())
+    done = {"n": 0}
+    monkeypatch.setattr(llm.progress, "done", lambda: done.update(n=done["n"] + 1))
+
+    out = llm.generate_subject("d", max_tokens=4)
+    assert done["n"] == 1
+    # The cleaner may reject the line. The raw reply is what the cap bounds.
+    assert llm.last_reply == "AAAA"
+    assert out == "AAAA"
+
+
+def test_empty_chunks_cannot_spin(monkeypatch):
+    """Chunks with no content and no finish_reason used to loop forever."""
+    def endless():
+        while True:
+            yield {"choices": [{"delta": {}, "finish_reason": None}]}
+
+    class _Empty:
+        def create_chat_completion(self, **kw):
+            return endless()
+
+    monkeypatch.setattr(llm, "_load", lambda: _Empty())
+    assert llm.generate_subject("d", max_tokens=4) == ""
+
+
+def test_blocked_stream_hits_the_deadline(monkeypatch):
+    """A next() that never returns falls back to '' and drops the model."""
+    import time
+
+    class _Stuck:
+        def create_chat_completion(self, **kw):
+            def gen():
+                time.sleep(30)
+                yield {"choices": [{"delta": {"content": "nope"}, "finish_reason": "stop"}]}
+            return gen()
+
+    monkeypatch.setattr(llm, "_load", lambda: _Stuck())
+    monkeypatch.setattr(llm, "_llama", object())
+    monkeypatch.setattr(llm, "_GEN_DEADLINE_S", 0.3)
+
+    started = time.monotonic()
+    assert llm.generate_subject("d") == ""
+    assert time.monotonic() - started < 5
+    assert llm._llama is None

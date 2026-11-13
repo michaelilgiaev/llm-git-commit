@@ -2783,7 +2783,41 @@ def _edit_fact(files: list[_File]) -> str:
 # same shape, or the same neighborhood. Smaller diffs stay exhaustive so a
 # short commit pairs exactly as before.
 _PAIR_EXACT = 40 * 40
+
+# SequenceMatcher is quadratic in line length. Every line the tests score is
+# well under this. A longer line is scored on its prefix so one generated
+# file cannot stall the commit.
+_RATIO_CAP = 480
+
+# A renamed function is the same body with a new name. The head of each body
+# is enough; comparing two whole files was the slow path.
+_BODY_CAP = 4000
+
 _DIGITS = re.compile(r"\d+")
+
+
+def _set_pair(matcher: SequenceMatcher, old: str, new: str) -> None:
+    """Point `matcher` at `old` and `new`. Long lines contribute a prefix only.
+
+    Lines at or under `_RATIO_CAP` are passed through unchanged, so a normal
+    diff gets the same ratios as before.
+    """
+    if len(old) > _RATIO_CAP or len(new) > _RATIO_CAP:
+        matcher.set_seqs(old[:_RATIO_CAP], new[:_RATIO_CAP])
+    else:
+        matcher.set_seqs(old, new)
+
+
+def _similar(old: str, new: str, threshold: float) -> bool:
+    """True when `old` and `new` score at least `threshold`.
+
+    Short strings use the full text. Longer ones use the same prefix cap as
+    `_set_pair`.
+    """
+    if len(old) > _RATIO_CAP or len(new) > _RATIO_CAP:
+        old = old[:_RATIO_CAP]
+        new = new[:_RATIO_CAP]
+    return SequenceMatcher(None, old, new).ratio() >= threshold
 
 
 def _shape_key(text: str) -> str:
@@ -2822,7 +2856,7 @@ def _consider_pair(
 ) -> None:
     if abs(len(old) - len(new)) > max(len(old), len(new), 1) * slack:
         return
-    matcher.set_seqs(old, new)
+    _set_pair(matcher, old, new)
     if matcher.quick_ratio() < threshold:
         return
     ratio = matcher.ratio()
@@ -3309,8 +3343,8 @@ def _mentioned_elsewhere(name: str, home: _File, files: list[_File]) -> bool:
 
 
 def _rename_evident(old: str, new: str, item: _File, files: list[_File]) -> bool:
-    body_old = "\n".join(_code_lines_raw(item.removed))
-    body_new = "\n".join(_code_lines_raw(item.added))
+    body_old = "\n".join(_code_lines_raw(item.removed))[:_BODY_CAP]
+    body_new = "\n".join(_code_lines_raw(item.added))[:_BODY_CAP]
     if body_old and body_new and SequenceMatcher(None, body_old, body_new).ratio() >= 0.45:
         return True
     for other in files:
@@ -3713,7 +3747,7 @@ def _almost_copied(clean: str, removed: list[str]) -> bool:
     for old in removed:
         if len(old) < 48:
             continue
-        if SequenceMatcher(None, clean, old).ratio() >= 0.9:
+        if _similar(clean, old, 0.9):
             return True
     return False
 
@@ -3739,7 +3773,7 @@ def _note_moved(sentence: str, removed: list[str]) -> bool:
             continue
         if clean == old:
             return True
-        if len(clean) >= 20 and len(old) >= 20 and SequenceMatcher(None, clean, old).ratio() >= 0.75:
+        if len(clean) >= 20 and len(old) >= 20 and _similar(clean, old, 0.75):
             return True
     return False
 
@@ -3999,7 +4033,7 @@ def _or_extension(files: list[_File]) -> str:
             for old in olds:
                 if len(old) < 24 or len(new) <= len(old):
                     continue
-                if SequenceMatcher(None, old.casefold(), new.casefold()).ratio() < 0.8:
+                if not _similar(old.casefold(), new.casefold(), 0.8):
                     continue
                 extra = _inserted_words(old, new)
                 match = re.fullmatch(r"(?i)or\s+(\S+)", extra.strip(" ."))
@@ -9848,22 +9882,34 @@ def _stringish(raw: str) -> bool:
     return len(stripped) <= 3
 
 
-def _string_tweak(raw: str, other: list[str]) -> bool:
-    """A one-word spelling fix inside a string is not a code change."""
+def _string_tweak(raw: str, other: list[str], index: int = 0) -> bool:
+    """A one-word spelling fix inside a string is not a code change.
+
+    A short list is compared in full, same as before. A long list only looks
+    at the neighborhood of `index`: the replaced string sits on that line,
+    and scanning every string against every other string held the commit.
+    """
     if not _stringish(raw):
         return False
     text = raw.strip()
+    if len(other) <= 48:
+        indexes = range(len(other))
+    else:
+        indexes = range(max(0, index - 8), min(len(other), index + 9))
     matcher = SequenceMatcher()
-    for cand in other:
-        other_text = cand.strip()
+    for j in indexes:
+        other_text = other[j].strip()
         if other_text == text:
             continue
-        short = min(len(text), len(other_text))
-        total = len(text) + len(other_text)
+        left, right = text, other_text
+        if len(left) > _RATIO_CAP or len(right) > _RATIO_CAP:
+            left, right = left[:_RATIO_CAP], right[:_RATIO_CAP]
+        short = min(len(left), len(right))
+        total = len(left) + len(right)
         # ratio >= 0.9 needs the shorter line to cover nine tenths of both.
         if total and 2 * short < 0.9 * total:
             continue
-        matcher.set_seqs(text, other_text)
+        matcher.set_seqs(left, right)
         if matcher.ratio() >= 0.9:
             return True
     return False
@@ -9874,7 +9920,7 @@ def _pair_kind(old: str, new: str) -> str:
     prose = _comment_line(old) or _comment_line(new) or (_stringish(old) and _stringish(new))
     if not prose or old == new:
         return ""
-    if SequenceMatcher(None, old, new).ratio() < 0.72:
+    if not _similar(old, new, 0.72):
         return ""
     if _collapsed(old) == _collapsed(new):
         return "format"
@@ -9883,7 +9929,7 @@ def _pair_kind(old: str, new: str) -> str:
     if old_words == new_words:
         return "format"
     if len(old_words) != len(new_words):
-        if SequenceMatcher(None, _collapsed(old), _collapsed(new)).ratio() >= 0.92:
+        if _similar(_collapsed(old), _collapsed(new), 0.92):
             return "typo"
         return "rewrite"
     changed = [(left, right) for left, right in zip(old_words, new_words) if left != right]
@@ -9938,7 +9984,7 @@ def _best_line_ratio(old: str, pool: list[str], indexes) -> tuple[str, float]:
         # Below 0.72 the partner cannot win, so the length bound is enough.
         if total and 2 * short < 0.72 * total:
             continue
-        matcher.set_seqs(old, new)
+        _set_pair(matcher, old, new)
         if matcher.quick_ratio() < 0.72:
             continue
         ratio = matcher.ratio()
@@ -9953,14 +9999,19 @@ def _typo_story(files: list[_File]) -> str:
     for item in files:
         added = [raw.strip() for raw in item.added if raw.strip()]
         removed = [raw.strip() for raw in item.removed if raw.strip()]
-        # Any real code line means this is not a typo commit. Stop before the
-        # pairwise scan; that scan used to run even when its result was discarded.
-        for raw in added:
-            if _comment_line(raw) or _string_tweak(raw, removed):
+        # Any real code line means this is not a typo commit. A comment is
+        # prose. A string is prose only when it is a spelling tweak of the
+        # line it replaced. Anything else returns before the pairwise scan.
+        for index, raw in enumerate(added):
+            if _comment_line(raw):
+                continue
+            if _stringish(raw) and _string_tweak(raw, removed, index):
                 continue
             return ""
-        for raw in removed:
-            if _comment_line(raw) or _string_tweak(raw, added):
+        for index, raw in enumerate(removed):
+            if _comment_line(raw):
+                continue
+            if _stringish(raw) and _string_tweak(raw, added, index):
                 continue
             return ""
         prepared.append((removed, added))
@@ -9992,14 +10043,18 @@ def _doc_example_story(files: list[_File]) -> str:
             continue
         added = [raw.strip() for raw in item.added if raw.strip()]
         removed = [raw.strip() for raw in item.removed if raw.strip()]
-        for raw in added:
-            if _comment_line(raw) or _string_tweak(raw, removed):
+        for index, raw in enumerate(added):
+            if _comment_line(raw):
+                continue
+            if _stringish(raw) and _string_tweak(raw, removed, index):
                 continue
             if raw.startswith(("import ", "from ", "package ", "use ")):
                 continue
             return ""
-        for raw in removed:
-            if _comment_line(raw) or _string_tweak(raw, added):
+        for index, raw in enumerate(removed):
+            if _comment_line(raw):
+                continue
+            if _stringish(raw) and _string_tweak(raw, added, index):
                 continue
             if raw.startswith(("import ", "from ", "package ", "use ")):
                 continue
@@ -10023,7 +10078,7 @@ def _doc_example_story(files: list[_File]) -> str:
                 total = len(old) + len(new)
                 if total and 2 * short < 0.5 * total:
                     continue
-                matcher.set_seqs(old, new)
+                _set_pair(matcher, old, new)
                 if matcher.quick_ratio() < 0.5 or matcher.ratio() < 0.5:
                     continue
                 rewrites += 1
@@ -10987,7 +11042,7 @@ def _literal_change(item: _File) -> str:
         for j, new in enumerate(added):
             if abs(len(old) - len(new)) > max(len(old), len(new), 1) * 0.45:
                 continue
-            matcher.set_seqs(old, new)
+            _set_pair(matcher, old, new)
             if matcher.quick_ratio() < 0.8:
                 continue
             ratio = matcher.ratio()
@@ -11050,7 +11105,7 @@ def _line_swaps(item: _File) -> list[tuple[tuple[str, str], int]]:
         for j, new in enumerate(added):
             if abs(len(old) - len(new)) > max(len(old), len(new), 1) * 0.5:
                 continue
-            matcher.set_seqs(old, new)
+            _set_pair(matcher, old, new)
             if matcher.quick_ratio() < 0.58:
                 continue
             ratio = matcher.ratio()

@@ -38,6 +38,21 @@ def test_long_patch_is_not_copied_verbatim():
     assert "xxxx" not in text
 
 
+def test_git_read_times_out(monkeypatch):
+    import checks
+
+    def boom(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=120)
+
+    monkeypatch.setattr(git_io.subprocess, "run", boom)
+    try:
+        git_io.has_staged_changes()
+    except checks.RepoError as exc:
+        assert "timed out" in str(exc)
+    else:
+        raise AssertionError("a hung git read must fail")
+
+
 def test_readme_prose_is_not_fed_to_the_model(git_repo):
     prose = "Write git commit subjects with a small language model.\n"
     (git_repo / "README.md").write_text(prose)

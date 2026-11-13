@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import os
 import re
+import signal
+import threading
 import urllib.request
 from pathlib import Path
 
@@ -36,11 +38,100 @@ SYSTEM_PROMPT = (
 # ramble cannot run the bar out and start over -- there is only this one pass.
 _MAX_TOKENS = 96
 
+# The fact card is at most ~900 characters. 2048 tokens covers that plus the
+# chat wrapper. A 4096 context only made the first commit allocate more.
+_N_CTX = 2048
+
+# One thread per core, but never more than four. A big machine oversubscribes
+# llama.cpp and the commit gets slower, not faster.
+_N_THREADS = 4
+
+# Load is about a second; a subject is a handful of tokens. Past this the
+# draft is the subject. A stream that never finishes must not block the commit.
+_GEN_DEADLINE_S = 20
+
 # A real GGUF is about a gigabyte. Anything smaller is a partial download.
 _MIN_BYTES = 1_000_000
+_GGUF_MAGIC = b"GGUF"
 
 _llama = None  # lazily built singleton (loading the GGUF costs ~1s; do it once)
 last_reply = ""  # raw text from the most recent generation, before the fallback
+
+
+class _GenerationTimeout(Exception):
+    """The model did not finish inside `_GEN_DEADLINE_S`."""
+
+
+def _on_deadline(_signum, _frame) -> None:
+    raise _GenerationTimeout()
+
+
+class _deadline:
+    """Raise `_GenerationTimeout` if the body is still running after `seconds`.
+
+    The timer is armed only on the main thread. Exit disarms it before the
+    previous handler is restored, so a late tick cannot kill the process.
+    """
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds = seconds
+        self._armed = False
+        self._prev = None
+        self._mask = None
+
+    def __enter__(self):
+        if (
+            self.seconds <= 0
+            or threading.current_thread() is not threading.main_thread()
+            or not hasattr(signal, "setitimer")
+            or not hasattr(signal, "pthread_sigmask")
+        ):
+            return self
+        self._prev = signal.getsignal(signal.SIGALRM)
+        self._mask = signal.pthread_sigmask(signal.SIG_BLOCK, [signal.SIGALRM])
+        try:
+            signal.signal(signal.SIGALRM, _on_deadline)
+            signal.setitimer(signal.ITIMER_REAL, self.seconds)
+            self._armed = True
+        except Exception:
+            signal.pthread_sigmask(signal.SIG_SETMASK, self._mask)
+            raise
+        signal.pthread_sigmask(signal.SIG_SETMASK, self._mask)
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        if not self._armed:
+            return False
+        # Block delivery, drop the timer, ignore anything already pending,
+        # then put the previous handler back.
+        signal.pthread_sigmask(signal.SIG_BLOCK, [signal.SIGALRM])
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, signal.SIG_IGN)
+        signal.pthread_sigmask(signal.SIG_SETMASK, self._mask)
+        signal.pthread_sigmask(signal.SIG_BLOCK, [signal.SIGALRM])
+        signal.signal(signal.SIGALRM, self._prev)
+        signal.pthread_sigmask(signal.SIG_SETMASK, self._mask)
+        self._armed = False
+        return False
+
+
+def _thread_count() -> int:
+    return max(1, min(os.cpu_count() or _N_THREADS, _N_THREADS))
+
+
+def _drop_model() -> None:
+    """Forget a model that timed out. The next commit loads a fresh one."""
+    global _llama
+    _llama = None
+
+
+def _gguf_file(path: str) -> bool:
+    """True when `path` starts with the GGUF magic. A partial download does not."""
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(4) == _GGUF_MAGIC
+    except OSError:
+        return False
 
 
 def _local_file() -> Path:
@@ -132,10 +223,13 @@ def _load():
     if _llama is None:
         from llama_cpp import Llama  # heavy; deferred
 
+        path = _model_path()
+        if not _gguf_file(path):
+            raise RuntimeError(f"model file is not a GGUF ({path})")
         _llama = Llama(
-            model_path=_model_path(),
-            n_ctx=4096,
-            n_threads=os.cpu_count() or 4,
+            model_path=path,
+            n_ctx=_N_CTX,
+            n_threads=_thread_count(),
             verbose=False,
         )
     return _llama
@@ -155,39 +249,50 @@ def generate_subject(diff: str, *, model: str | None = None,
     once. Returns the raw text (message.extract_subject cleans it); '' on failure.
 
     `model` is accepted for call-site compatibility and ignored."""
-    # Load first. A download bar must finish before the token bar starts,
-    # and a hub warning must not land in the middle of the line.
-    try:
-        llama = _load()
-    except RepoError:
-        raise
-    except Exception:
-        return ""
+    # Load first, inside the same deadline as generation. A download bar must
+    # finish before the token bar starts, and a hub warning must not land in
+    # the middle of the line. The loop also stops on its own: llama-cpp stops
+    # on finish_reason, but a stream that never sets one (or yields empty
+    # chunks, or blocks inside one next()) used to sit here forever.
     global last_reply
     text = ""
     n = 0
     last_reply = ""
     progress.bar(0, max_tokens, prefix="writing commit ")
     try:
-        stream = llama.create_chat_completion(
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": _model_view(diff)},
-            ],
-            max_tokens=max_tokens,
-            temperature=0,
-            stop=["\n"],
-            stream=True,
-        )
-        for chunk in stream:
-            choice = chunk["choices"][0]
-            piece = choice["delta"].get("content")
-            if piece:
-                text += piece
-                n += 1
-                progress.bar(n, max_tokens, prefix="writing commit ")
-            if choice.get("finish_reason") is not None:
-                break
+        with _deadline(_GEN_DEADLINE_S):
+            llama = _load()
+            stream = llama.create_chat_completion(
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": _model_view(diff)},
+                ],
+                max_tokens=max_tokens,
+                temperature=0,
+                stop=["\n"],
+                stream=True,
+            )
+            # Content tokens stop at max_tokens. Empty chunks stop at the
+            # chunk cap, so a generator that never sets finish_reason returns.
+            chunk_cap = max(8, max_tokens * 4)
+            for seen, chunk in enumerate(stream, start=1):
+                choice = chunk["choices"][0]
+                piece = choice["delta"].get("content")
+                if piece:
+                    text += piece
+                    n += 1
+                    progress.bar(n, max_tokens, prefix="writing commit ")
+                if (
+                    choice.get("finish_reason") is not None
+                    or n >= max_tokens
+                    or seen >= chunk_cap
+                ):
+                    break
+    except RepoError:
+        raise
+    except _GenerationTimeout:
+        _drop_model()
+        return ""
     except Exception:
         return ""
     finally:
