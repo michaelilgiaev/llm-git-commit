@@ -1,3 +1,18 @@
+
+
+<table width="100%">
+<thead>
+<tr><th align="left">ℹ️ SIDE NOTE</th></tr>
+</thead>
+<tbody>
+<tr><td>
+
+This currently performs relatively worse than cheap frontier models like Anthropic's Haiku. Quick, crude performance comparisons were done. The goal of `llm-git-commit` is to be on par with cheap frontier models and run on the majority of CPUs.
+
+</td></tr>
+</tbody>
+</table>
+
 <p align="center">
   <img src="assets/llm-git-commit_title_627x230.png" alt="llm-git-commit">
 </p>
