@@ -2,5 +2,4 @@ git
 python
 python-pip
 expat
-lib32-expat
 bash-completion
