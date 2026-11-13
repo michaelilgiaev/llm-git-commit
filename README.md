@@ -7,7 +7,7 @@
 <tbody>
 <tr><td>
 
-This currently performs relatively worse than cheap frontier models like Anthropic's Haiku. Quick, crude performance comparisons were done. The goal of `llm-git-commit` is to be on par with cheap frontier models and run on the majority of CPUs.
+This currently performs relatively worse than cheap frontier models like Anthropic's Haiku.
 
 </td></tr>
 </tbody>
