@@ -52,9 +52,27 @@ def test_one_generation_then_commit(staged_repo, monkeypatch):
     assert "Fix the thing" in log
 
 
-def test_all_chatter_fails_without_committing(staged_repo, monkeypatch, capsys):
+def test_chatter_commits_the_harness_draft(staged_repo, monkeypatch, capsys):
+    # The model answered with an acknowledgement. The staged file still commits
+    # with the line the harness already wrote.
     monkeypatch.setattr(llm, "generate_subject", lambda *a, **k: "Done. Ready above.")
-    assert commit_command.run() == 1
-    assert "could not write a commit subject" in capsys.readouterr().err
-    import git_io
-    assert git_io.head_has_commits() is False
+    assert commit_command.run() == 0
+    captured = capsys.readouterr()
+    assert "could not write a commit subject" not in captured.err
+    log = _git(staged_repo, "log", "--oneline", "-1").stdout
+    assert "Add hi in app.py" in log
+
+
+def test_imperative_ignore_subject_is_committed(staged_repo, monkeypatch):
+    subject = "Ignore FORGOTTEN_NODE for the active sender"
+    monkeypatch.setattr(llm, "generate_subject", lambda *a, **k: subject)
+    assert commit_command.run() == 0
+    log = _git(staged_repo, "log", "--oneline", "-1").stdout
+    assert subject in log
+
+
+def test_model_crash_commits_the_harness_draft(staged_repo, monkeypatch):
+    monkeypatch.setattr(llm, "generate_subject", lambda *a, **k: "")
+    assert commit_command.run() == 0
+    log = _git(staged_repo, "log", "--oneline", "-1").stdout
+    assert "Add hi in app.py" in log

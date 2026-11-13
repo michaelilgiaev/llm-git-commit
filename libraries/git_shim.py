@@ -11,8 +11,8 @@ invocation is inspected:
     verbatim. The shim is transparent; when in doubt it delegates.
 
 Finding the real git: we drop the shim's OWN directory from PATH and resolve `git`
-again, so the shim never calls itself. If the model cannot write a subject we
-stop and say so. We do not open the editor.
+again, so the shim never calls itself. A staged change always gets a subject
+(the model line, otherwise the harness draft). We do not open the editor.
 """
 
 from __future__ import annotations
@@ -124,7 +124,6 @@ def main(argv: list[str] | None = None) -> int:
     import checks  # noqa: E402
     import git_io  # noqa: E402
     import llm  # noqa: E402
-    import message  # noqa: E402
 
     # git_io and checks shell out to `git` by name. Drop the shim directory for
     # that window only, then put PATH back so this process does not leak the change
@@ -140,11 +139,7 @@ def main(argv: list[str] | None = None) -> int:
             return _exec_git(git, args)          # nothing to do -> git's own no-op message
 
         diff = git_io.commit_preview_diff(include_tracked=stages_tracked)
-        subject = message.extract_subject(llm.generate_subject(diff))
-        if not subject:
-            print("llm-git-commit: could not write a commit subject.", file=sys.stderr)
-            return 1
-
+        subject = llm.commit_subject(diff)
         return _exec_git(git, ["commit", "-m", subject, *staged])
     except checks.RepoError as exc:
         print(f"llm-git-commit: {exc}", file=sys.stderr)

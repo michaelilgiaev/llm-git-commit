@@ -83,6 +83,35 @@ def test_model_failure_returns_empty(monkeypatch):
     assert llm.generate_subject("d") == ""
 
 
+def test_commit_subject_uses_the_draft_when_the_model_says_nothing(monkeypatch):
+    card = "draft: Ignore FORGOTTEN_NODE for the active sender\nfile: node.go\n"
+    monkeypatch.setattr(llm, "generate_subject", lambda *a, **k: "Done.")
+    assert llm.commit_subject(card) == "Ignore FORGOTTEN_NODE for the active sender"
+
+
+def test_commit_subject_keeps_a_draft_the_cleaner_rejects(monkeypatch):
+    card = "draft: I added a check so the sender skips forgotten nodes\nfile: node.go\n"
+    monkeypatch.setattr(llm, "generate_subject", lambda *a, **k: "")
+    assert llm.commit_subject(card) == "I added a check so the sender skips forgotten nodes"
+
+
+def test_commit_subject_names_the_file_when_the_draft_is_only_an_ack(monkeypatch):
+    card = "draft: Done.\nfile: pool.go\n"
+    monkeypatch.setattr(llm, "generate_subject", lambda *a, **k: "")
+    assert llm.commit_subject(card) == "Update pool.go"
+
+
+def test_commit_subject_names_a_diff_header(monkeypatch):
+    monkeypatch.setattr(llm, "generate_subject", lambda *a, **k: "")
+    diff = "diff --git a/app.py b/app.py\n"
+    assert llm.commit_subject(diff) == "Update app.py"
+
+
+def test_commit_subject_still_writes_when_nothing_parses(monkeypatch):
+    monkeypatch.setattr(llm, "generate_subject", lambda *a, **k: "Done. Ready above.")
+    assert llm.commit_subject("a diff") == "Update staged files"
+
+
 def test_system_prompt_stays_short():
     # A long prompt made the 1.5B model echo the instruction. Keep it one line,
     # and pin the semicolon style the commit line is supposed to use.

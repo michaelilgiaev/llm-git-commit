@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from difflib import SequenceMatcher
+from functools import lru_cache
 from pathlib import Path
 
 _MAX_LINE = 360
@@ -2777,16 +2778,24 @@ def _edit_fact(files: list[_File]) -> str:
     )
 
 
-def _pair_lines(removed: list[str], added: list[str]) -> list[tuple[str, str]]:
-    """Greedy pairs of similar code lines. Each line is used at most once."""
-    cands: list[tuple[float, int, int]] = []
-    for i, old in enumerate(removed):
-        for j, new in enumerate(added):
-            if abs(len(old) - len(new)) > max(len(old), len(new), 1) * 0.7:
-                continue
-            ratio = SequenceMatcher(None, old, new).ratio()
-            if ratio >= 0.45:
-                cands.append((ratio, i, j))
+# Every removed line against every added line is quadratic. Past this many
+# pairs the subject only needs the edit's real partners: identical lines,
+# same shape, or the same neighborhood. Smaller diffs stay exhaustive so a
+# short commit pairs exactly as before.
+_PAIR_EXACT = 40 * 40
+_DIGITS = re.compile(r"\d+")
+
+
+def _shape_key(text: str) -> str:
+    """Line identity with numbers collapsed, so `helper_1` matches `helper_2`."""
+    return _DIGITS.sub("#", text)
+
+
+def _greedy_pairs(
+    cands: list[tuple[float, int, int]],
+    removed: tuple[str, ...] | list[str],
+    added: tuple[str, ...] | list[str],
+) -> list[tuple[str, str]]:
     cands.sort(reverse=True)
     seen_i: set[int] = set()
     seen_j: set[int] = set()
@@ -2800,6 +2809,118 @@ def _pair_lines(removed: list[str], added: list[str]) -> list[tuple[str, str]]:
     return pairs
 
 
+def _consider_pair(
+    matcher: SequenceMatcher,
+    cands: list[tuple[float, int, int]],
+    old: str,
+    new: str,
+    i: int,
+    j: int,
+    *,
+    threshold: float,
+    slack: float,
+) -> None:
+    if abs(len(old) - len(new)) > max(len(old), len(new), 1) * slack:
+        return
+    matcher.set_seqs(old, new)
+    if matcher.quick_ratio() < threshold:
+        return
+    ratio = matcher.ratio()
+    if ratio >= threshold:
+        cands.append((ratio, i, j))
+
+
+def _pair_exact(removed: tuple[str, ...], added: tuple[str, ...]) -> list[tuple[str, str]]:
+    cands: list[tuple[float, int, int]] = []
+    matcher = SequenceMatcher()
+    for i, old in enumerate(removed):
+        for j, new in enumerate(added):
+            _consider_pair(matcher, cands, old, new, i, j, threshold=0.45, slack=0.7)
+    return _greedy_pairs(cands, removed, added)
+
+
+def _pair_fast(removed: tuple[str, ...], added: tuple[str, ...]) -> list[tuple[str, str]]:
+    """Greedy pairing that does not compare lines with nothing in common.
+
+    Identical lines are ratio 1, so they claim their slots first. What is left
+    is compared to the same shape (digits stripped) and to a small window at
+    the same position. A large commit used to compare every line with every
+    other line, several times, before the model even started.
+    """
+    n, m = len(removed), len(added)
+    added_at: dict[str, list[int]] = {}
+    for j, line in enumerate(added):
+        added_at.setdefault(line, []).append(j)
+    used_i: set[int] = set()
+    used_j: set[int] = set()
+    cands: list[tuple[float, int, int]] = []
+    identical: list[tuple[float, int, int]] = []
+    for i, line in enumerate(removed):
+        for j in added_at.get(line, ()):
+            identical.append((1.0, i, j))
+    identical.sort(reverse=True)
+    for _ratio, i, j in identical:
+        if i in used_i or j in used_j:
+            continue
+        used_i.add(i)
+        used_j.add(j)
+        cands.append((1.0, i, j))
+
+    added_shape: dict[str, list[int]] = {}
+    for j, line in enumerate(added):
+        if j in used_j:
+            continue
+        added_shape.setdefault(_shape_key(line), []).append(j)
+    removed_shape: dict[str, list[int]] = {}
+    for i, line in enumerate(removed):
+        if i in used_i:
+            continue
+        removed_shape.setdefault(_shape_key(line), []).append(i)
+
+    matcher = SequenceMatcher()
+    seen: set[tuple[int, int]] = set()
+
+    def consider(i: int, j: int) -> None:
+        if i in used_i or j in used_j or (i, j) in seen:
+            return
+        seen.add((i, j))
+        _consider_pair(
+            matcher, cands, removed[i], added[j], i, j, threshold=0.45, slack=0.7,
+        )
+
+    for key, group in removed_shape.items():
+        targets = added_shape.get(key, ())
+        wide = len(targets) > 32
+        for pos, i in enumerate(group):
+            if wide:
+                chosen = targets[max(0, pos - 8):pos + 9]
+            else:
+                chosen = targets
+            for j in chosen:
+                consider(i, j)
+            if n and m:
+                center = (i * m) // n
+                for j in range(max(0, center - 6), min(m, center + 7)):
+                    consider(i, j)
+    return _greedy_pairs(cands, removed, added)
+
+
+@lru_cache(maxsize=128)
+def _pair_lines_cached(
+    removed: tuple[str, ...], added: tuple[str, ...],
+) -> tuple[tuple[str, str], ...]:
+    if len(removed) * len(added) <= _PAIR_EXACT:
+        pairs = _pair_exact(removed, added)
+    else:
+        pairs = _pair_fast(removed, added)
+    return tuple(pairs)
+
+
+def _pair_lines(removed: list[str], added: list[str]) -> list[tuple[str, str]]:
+    """Greedy pairs of similar code lines. Each line is used at most once."""
+    return list(_pair_lines_cached(tuple(removed), tuple(added)))
+
+
 def _call_rewrite(files: list[_File]) -> str:
     """`.map(|_| x.clone())` rewritten as `.cloned()`, repeated, is the commit."""
     cloned = copied = 0
@@ -2809,30 +2930,16 @@ def _call_rewrite(files: list[_File]) -> str:
             continue
         removed = _code_lines_raw(item.removed)
         added = _code_lines_raw(item.added)
-        cands: list[tuple[float, int, int]] = []
-        for i, old in enumerate(removed):
-            for j, new in enumerate(added):
-                if abs(len(old) - len(new)) > max(len(old), len(new), 1) * 0.7:
-                    continue
-                ratio = SequenceMatcher(None, old, new).ratio()
-                if ratio >= 0.45:
-                    cands.append((ratio, i, j))
-        cands.sort(reverse=True)
-        seen_i: set[int] = set()
-        seen_j: set[int] = set()
-        for _ratio, i, j in cands:
-            if i in seen_i or j in seen_j:
-                continue
-            seen_i.add(i)
-            seen_j.add(j)
-            old, new = removed[i], added[j]
+        paired = 0
+        for old, new in _pair_lines(removed, added):
+            paired += 1
             if ".clone()" in old and ".cloned()" in new:
                 cloned += 1
             elif ".copy()" in old and ".copied()" in new:
                 copied += 1
             elif old != new:
                 other += 1
-        other += len(removed) - len(seen_i) + len(added) - len(seen_j)
+        other += len(removed) + len(added) - 2 * paired
     if cloned + copied < 3:
         return ""
     if other > (cloned + copied) * 2:
@@ -7536,15 +7643,27 @@ def _library_files(files: list[_File]) -> list[_File]:
     ]
 
 
+def _file_notes(item: _File) -> list[str]:
+    """Cleaned added sentences for one file. Parsed once per commit."""
+    cached = getattr(item, "_added_note_cache", None)
+    if cached is not None:
+        return cached
+    notes: list[str] = []
+    for sentence in _sentences(item.added):
+        text = _clean_markup(sentence).strip()
+        if text:
+            notes.append(text)
+    item._added_note_cache = notes
+    return notes
+
+
 def _added_notes(files: list[_File]) -> list[tuple[_File, str]]:
     found: list[tuple[_File, str]] = []
     for item in files:
         if _noise(item) or _is_manifest(item.path):
             continue
-        for sentence in _sentences(item.added):
-            text = _clean_markup(sentence).strip()
-            if text:
-                found.append((item, text))
+        for text in _file_notes(item):
+            found.append((item, text))
     return found
 
 
@@ -9733,12 +9852,21 @@ def _string_tweak(raw: str, other: list[str]) -> bool:
     """A one-word spelling fix inside a string is not a code change."""
     if not _stringish(raw):
         return False
-    best = 0.0
+    text = raw.strip()
+    matcher = SequenceMatcher()
     for cand in other:
-        if cand.strip() == raw.strip():
+        other_text = cand.strip()
+        if other_text == text:
             continue
-        best = max(best, SequenceMatcher(None, raw.strip(), cand.strip()).ratio())
-    return best >= 0.9
+        short = min(len(text), len(other_text))
+        total = len(text) + len(other_text)
+        # ratio >= 0.9 needs the shorter line to cover nine tenths of both.
+        if total and 2 * short < 0.9 * total:
+            continue
+        matcher.set_seqs(text, other_text)
+        if matcher.ratio() >= 0.9:
+            return True
+    return False
 
 
 def _pair_kind(old: str, new: str) -> str:
@@ -9771,31 +9899,77 @@ def _pair_kind(old: str, new: str) -> str:
     return "rewrite"
 
 
+def _nearest_line(old: str, pool: list[str], index: int) -> tuple[str, float]:
+    """The closest other line in `pool`. A long list only looks nearby.
+
+    Typo fixes sit on the same comment they replace. Scanning every comment
+    against every other comment made a docs-only diff quadratic.
+    """
+    if not pool:
+        return "", 0.0
+    if len(pool) <= 48:
+        indexes = range(len(pool))
+    else:
+        # The replaced comment is almost always the line at the same index.
+        # Score that neighborhood first and keep it when the match is already close.
+        near = []
+        if index < len(pool):
+            near.append(index)
+        for j in range(max(0, index - 2), min(len(pool), index + 3)):
+            if j not in near:
+                near.append(j)
+        best, best_ratio = _best_line_ratio(old, pool, near)
+        if best_ratio >= 0.9:
+            return best, best_ratio
+        indexes = range(max(0, index - 8), min(len(pool), index + 9))
+    return _best_line_ratio(old, pool, indexes)
+
+
+def _best_line_ratio(old: str, pool: list[str], indexes) -> tuple[str, float]:
+    best = ""
+    best_ratio = 0.0
+    matcher = SequenceMatcher()
+    for j in indexes:
+        new = pool[j]
+        if new == old:
+            continue
+        short = min(len(old), len(new))
+        total = len(old) + len(new)
+        # Below 0.72 the partner cannot win, so the length bound is enough.
+        if total and 2 * short < 0.72 * total:
+            continue
+        matcher.set_seqs(old, new)
+        if matcher.quick_ratio() < 0.72:
+            continue
+        ratio = matcher.ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best = new
+    return best, best_ratio
+
+
 def _typo_story(files: list[_File]) -> str:
-    typos = 0
-    rewrites = 0
-    formats = 0
-    codeish = 0
+    prepared: list[tuple[list[str], list[str]]] = []
     for item in files:
         added = [raw.strip() for raw in item.added if raw.strip()]
         removed = [raw.strip() for raw in item.removed if raw.strip()]
+        # Any real code line means this is not a typo commit. Stop before the
+        # pairwise scan; that scan used to run even when its result was discarded.
         for raw in added:
             if _comment_line(raw) or _string_tweak(raw, removed):
                 continue
-            codeish += 1
+            return ""
         for raw in removed:
             if _comment_line(raw) or _string_tweak(raw, added):
                 continue
-            codeish += 1
-        for old in removed:
-            best_new = ""
-            best_ratio = 0.0
-            for new in added:
-                if old == new:
-                    continue
-                ratio = SequenceMatcher(None, old, new).ratio()
-                if ratio > best_ratio:
-                    best_ratio, best_new = ratio, new
+            return ""
+        prepared.append((removed, added))
+    typos = 0
+    rewrites = 0
+    formats = 0
+    for removed, added in prepared:
+        for index, old in enumerate(removed):
+            best_new, best_ratio = _nearest_line(old, added, index)
             kind = _pair_kind(old, best_new) if best_new and best_ratio >= 0.72 else ""
             if kind == "typo":
                 typos += 1
@@ -9803,8 +9977,6 @@ def _typo_story(files: list[_File]) -> str:
                 rewrites += 1
             elif kind == "format":
                 formats += 1
-    if codeish:
-        return ""
     if typos >= 3 and rewrites <= max(1, typos // 4):
         return "Fix typos in comments and docs"
     if formats >= 3 and typos == 0 and rewrites == 0:
@@ -9814,9 +9986,7 @@ def _typo_story(files: list[_File]) -> str:
 
 def _doc_example_story(files: list[_File]) -> str:
     """Doc comments rewritten to the current signatures, with no code edit."""
-    codeish = 0
-    names: list[str] = []
-    rewrites = 0
+    rows: list[tuple[_File, list[str], list[str]]] = []
     for item in files:
         if _noise(item) or _is_manifest(item.path):
             continue
@@ -9827,25 +9997,39 @@ def _doc_example_story(files: list[_File]) -> str:
                 continue
             if raw.startswith(("import ", "from ", "package ", "use ")):
                 continue
-            codeish += 1
+            return ""
         for raw in removed:
             if _comment_line(raw) or _string_tweak(raw, added):
                 continue
             if raw.startswith(("import ", "from ", "package ", "use ")):
                 continue
-            codeish += 1
-        for old in removed:
+            return ""
+        rows.append((item, removed, added))
+    names: list[str] = []
+    rewrites = 0
+    matcher = SequenceMatcher()
+    for item, removed, added in rows:
+        for index, old in enumerate(removed):
             if not _comment_line(old) or not re.search(r"\b(func|def|fn)\b", old):
                 continue
-            for new in added:
+            if len(added) <= 48:
+                pool = added
+            else:
+                pool = added[max(0, index - 8):index + 9]
+            for new in pool:
                 if not _comment_line(new) or old == new or _collapsed(old) == _collapsed(new):
                     continue
-                if SequenceMatcher(None, old, new).ratio() < 0.5:
+                short = min(len(old), len(new))
+                total = len(old) + len(new)
+                if total and 2 * short < 0.5 * total:
+                    continue
+                matcher.set_seqs(old, new)
+                if matcher.quick_ratio() < 0.5 or matcher.ratio() < 0.5:
                     continue
                 rewrites += 1
                 names.append(Path(item.path).stem)
                 break
-    if codeish or rewrites < 2:
+    if rewrites < 2:
         return ""
     return "Fix the doc examples in " + _and(list(dict.fromkeys(names))[:3])
 
@@ -10798,11 +10982,15 @@ def _literal_change(item: _File) -> str:
     added = _code_lines_raw(item.added)[:50]
     counts: Counter[tuple[str, str]] = Counter()
     cands: list[tuple[float, int, int, str, str]] = []
+    matcher = SequenceMatcher()
     for i, old in enumerate(removed):
         for j, new in enumerate(added):
             if abs(len(old) - len(new)) > max(len(old), len(new), 1) * 0.45:
                 continue
-            ratio = SequenceMatcher(None, old, new).ratio()
+            matcher.set_seqs(old, new)
+            if matcher.quick_ratio() < 0.8:
+                continue
+            ratio = matcher.ratio()
             if ratio >= 0.8:
                 cands.append((ratio, i, j, old, new))
     cands.sort(reverse=True)
@@ -10850,15 +11038,22 @@ def _literal_change(item: _File) -> str:
 
 
 def _line_swaps(item: _File) -> list[tuple[tuple[str, str], int]]:
+    cached = getattr(item, "_swap_cache", None)
+    if cached is not None:
+        return cached
     removed = _code_lines_raw(item.removed)[:60]
     added = _code_lines_raw(item.added)[:60]
     counts: Counter[tuple[str, str]] = Counter()
     cands: list[tuple[float, int, int, str, str]] = []
+    matcher = SequenceMatcher()
     for i, old in enumerate(removed):
         for j, new in enumerate(added):
             if abs(len(old) - len(new)) > max(len(old), len(new), 1) * 0.5:
                 continue
-            ratio = SequenceMatcher(None, old, new).ratio()
+            matcher.set_seqs(old, new)
+            if matcher.quick_ratio() < 0.58:
+                continue
+            ratio = matcher.ratio()
             # 0.58, not 0.72: `view.Layer` and `view.Content` share a short prefix.
             if ratio >= 0.58:
                 cands.append((ratio, i, j, old, new))
@@ -10877,7 +11072,9 @@ def _line_swaps(item: _File) -> list[tuple[tuple[str, str], int]]:
         diffs = [(a, b) for a, b in zip(old_toks, new_toks) if a != b]
         if len(diffs) == 1 and not _boring_tok(diffs[0][0]) and not _boring_tok(diffs[0][1]):
             counts[diffs[0]] += 1
-    return counts.most_common()
+    found = counts.most_common()
+    item._swap_cache = found
+    return found
 
 
 _BAD_PHRASE = (
@@ -11532,20 +11729,108 @@ def _moved(files: list[_File]) -> str:
     return ""
 
 
+def _note_swap(
+    pairs: dict[tuple[str, str], int],
+    first: dict[tuple[str, str], tuple[int, int, int]],
+    swap: tuple[str, str],
+    times: int,
+    loc: tuple[int, int, int],
+) -> None:
+    pairs[swap] = pairs.get(swap, 0) + times
+    seen = first.get(swap)
+    if seen is None or loc < seen:
+        first[swap] = loc
+
+
 def _renamed(files: list[_File]) -> str:
     """The same line with one identifier swapped, repeated, is a rename."""
+    # Group lines that share every identifier but one. Comparing every removed
+    # line with every added line made a large commit quadratic before this ran.
+    buckets: dict[tuple, tuple[Counter[str], Counter[str], dict[str, int], dict[str, int]]] = {}
+    for file_index, item in enumerate(files):
+        removed = [
+            raw.strip() for raw in item.removed
+            if raw.strip() and not raw.strip().startswith(("//", "#"))
+        ]
+        added = [
+            raw.strip() for raw in item.added
+            if raw.strip() and not raw.strip().startswith(("//", "#"))
+        ]
+        for is_removed, lines in ((True, removed), (False, added)):
+            for index, line in enumerate(lines):
+                toks = tuple(_IDENT.findall(line))
+                if not toks:
+                    continue
+                for pos, tok in enumerate(toks):
+                    key = (file_index, toks[:pos], toks[pos + 1:])
+                    bucket = buckets.get(key)
+                    if bucket is None:
+                        bucket = (Counter(), Counter(), {}, {})
+                        buckets[key] = bucket
+                    counts, firsts = (bucket[0], bucket[2]) if is_removed else (bucket[1], bucket[3])
+                    counts[tok] += 1
+                    if tok not in firsts or index < firsts[tok]:
+                        firsts[tok] = index
     pairs: dict[tuple[str, str], int] = {}
-    for item in files:
-        removed = [raw.strip() for raw in item.removed if raw.strip() and not raw.strip().startswith(("//", "#"))]
-        added = [raw.strip() for raw in item.added if raw.strip() and not raw.strip().startswith(("//", "#"))]
-        for old in removed:
-            for new in added:
-                swap = _one_token_swap(old, new)
-                if swap:
-                    pairs[swap] = pairs.get(swap, 0) + 1
+    first: dict[tuple[str, str], tuple[int, int, int]] = {}
+    large: list[tuple[Counter[str], Counter[str], dict[str, int], dict[str, int], int]] = []
+    for key, (removed_counts, added_counts, removed_at, added_at) in buckets.items():
+        # A wide group of unique names contributes at most one of each swap.
+        # Expanding it is the quadratic case, and one copy cannot be the rename.
+        if (
+            len(removed_counts) * len(added_counts) > 48
+            and max(removed_counts.values(), default=0) == 1
+            and max(added_counts.values(), default=0) == 1
+        ):
+            large.append((removed_counts, added_counts, removed_at, added_at, key[0]))
+            continue
+        for old, old_n in removed_counts.items():
+            for new, new_n in added_counts.items():
+                if old == new:
+                    continue
+                _note_swap(
+                    pairs, first, (old, new), old_n * new_n,
+                    (key[0], removed_at[old], added_at[new]),
+                )
+    for removed_counts, added_counts, removed_at, added_at, file_index in large:
+        for (old, new), _count in list(pairs.items()):
+            times = removed_counts[old] * added_counts[new]
+            if times:
+                _note_swap(
+                    pairs, first, (old, new), times,
+                    (file_index, removed_at[old], added_at[new]),
+                )
+    if len(large) >= 4:
+        # A name swapped in several different shapes never hits the small groups.
+        degree_r: Counter[str] = Counter()
+        degree_a: Counter[str] = Counter()
+        for removed_counts, added_counts, _ri, _aj, _file in large:
+            degree_r.update(removed_counts)
+            degree_a.update(added_counts)
+        hot_r = [tok for tok, n in degree_r.items() if n >= 4]
+        hot_a = [tok for tok, n in degree_a.items() if n >= 4]
+        for old in hot_r:
+            for new in hot_a:
+                if old == new or (old, new) in pairs:
+                    continue
+                exact = 0
+                where: tuple[int, int, int] | None = None
+                for removed_counts, added_counts, removed_at, added_at, file_index in large:
+                    times = removed_counts[old] * added_counts[new]
+                    if not times:
+                        continue
+                    exact += times
+                    loc = (file_index, removed_at[old], added_at[new])
+                    if where is None or loc < where:
+                        where = loc
+                if exact and where is not None:
+                    _note_swap(pairs, first, (old, new), exact, where)
     if not pairs:
         return ""
-    (old, new), count = max(pairs.items(), key=lambda item: item[1])
+    (old, new), count = max(
+        pairs.items(),
+        key=lambda item: (item[1], tuple(-part for part in first[item[0]])),
+    )
     # A couple of swapped locals is not a rename commit. Require a repeated swap.
     if count < 4 or not _strong(old) or not _strong(new):
         return ""
@@ -11561,17 +11846,6 @@ def _renamed(files: list[_File]) -> str:
     if re.search(rf"\b{re.escape(new)}\b", removed_blob):
         return ""
     return f"Rename {old} to {new}"
-
-
-def _one_token_swap(old: str, new: str) -> tuple[str, str] | None:
-    old_toks = _IDENT.findall(old)
-    new_toks = _IDENT.findall(new)
-    if len(old_toks) != len(new_toks) or len(old_toks) < 1:
-        return None
-    diffs = [(a, b) for a, b in zip(old_toks, new_toks) if a != b]
-    if len(diffs) != 1:
-        return None
-    return diffs[0]
 
 
 def _moved_symbol(files: list[_File]) -> str:

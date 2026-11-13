@@ -14,6 +14,7 @@ The llama import is deferred so importing this module stays cheap.
 from __future__ import annotations
 
 import os
+import re
 import urllib.request
 from pathlib import Path
 
@@ -199,3 +200,64 @@ def generate_subject(diff: str, *, model: str | None = None,
     if draft is not None:
         return harness.pick(cleaned, draft, diff)
     return digest.choose(cleaned, diff)
+
+
+_FILE_ROW = re.compile(r"^file:\s*(\S.*?)\s*$", re.I)
+_DIFF_GIT = re.compile(r"^diff --git a/(.+?) b/")
+_STAT_ROW = re.compile(r"^(?P<path>.+?)\s+\|\s+(?:\d+|Bin\b)")
+_CARD_KEY = ("draft:", "added:", "removed:", "why:", "note:", "code:")
+
+
+def commit_subject(diff: str) -> str:
+    """One subject for a staged diff. Always non-empty when there is a diff.
+
+    The model rephrases the fact card. A blank reply, a crash, or a line the
+    cleaner refuses still commits the harness draft, then the file name.
+    """
+    written = generate_subject(diff)
+    subject = message.extract_subject(written)
+    if subject:
+        return subject
+    draft = harness.draft_of(diff) or ""
+    subject = message.extract_subject(draft) or message.keep_line(draft)
+    if subject:
+        return subject
+    named = _named_subject(diff)
+    if named:
+        return named
+    return "Update staged files"
+
+
+def _add_name(names: list[str], raw: str) -> None:
+    path = (raw or "").strip().strip('"')
+    if " => " in path:
+        path = path.split(" => ")[-1].strip().strip("}")
+    name = Path(path).name
+    if name and name not in names and not name.casefold().endswith((".lock", ".sum")):
+        names.append(name)
+
+
+def _named_subject(diff: str) -> str:
+    """`Update <file>` from a fact card, a stat, or a diff header."""
+    names: list[str] = []
+    for raw in (diff or "").splitlines():
+        line = raw.strip()
+        lower = line.lower()
+        if lower.startswith(_CARD_KEY):
+            continue
+        match = _FILE_ROW.match(line)
+        if match:
+            _add_name(names, match.group(1))
+            continue
+        match = _DIFF_GIT.match(line)
+        if match:
+            _add_name(names, match.group(1))
+            continue
+        match = _STAT_ROW.match(line)
+        if match:
+            _add_name(names, match.group("path"))
+    if not names:
+        return ""
+    if len(names) == 1:
+        return f"Update {names[0]}"
+    return f"Update {names[0]}; update {names[1]}"

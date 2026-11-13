@@ -145,7 +145,7 @@ def test_hijack_generates_subject_and_delegates_to_real_git(monkeypatch):
     assert calls == [("/usr/bin/git", ["commit", "-m", "Add feature", "-s"])]
 
 
-def test_hijack_does_not_open_the_editor_when_model_gives_nothing(monkeypatch, capsys):
+def test_hijack_writes_a_subject_when_the_model_gives_nothing(monkeypatch, capsys):
     calls = []
     monkeypatch.setattr(git_shim, "_real_git", lambda: "/usr/bin/git")
     monkeypatch.setattr(git_shim, "_exec_git",
@@ -158,9 +158,30 @@ def test_hijack_does_not_open_the_editor_when_model_gives_nothing(monkeypatch, c
     monkeypatch.setattr(git_io, "commit_preview_diff", lambda *, include_tracked: "a diff")
     monkeypatch.setattr(llm, "generate_subject", lambda *a, **k: "Done.")  # cleans to ''
 
-    assert git_shim.main(["commit"]) == 1
-    assert calls == []                  # no git commit, so no editor
-    assert "could not write a commit subject" in capsys.readouterr().err
+    assert git_shim.main(["commit"]) == 0
+    # A subject is passed to git, so the editor stays closed.
+    assert calls == [["commit", "-m", "Update staged files"]]
+    assert "could not write a commit subject" not in capsys.readouterr().err
+
+
+def test_hijack_uses_the_draft_when_the_model_gives_nothing(monkeypatch):
+    calls = []
+    monkeypatch.setattr(git_shim, "_real_git", lambda: "/usr/bin/git")
+    monkeypatch.setattr(git_shim, "_exec_git",
+                        lambda git, args: calls.append(args) or 0)
+    import checks
+    import git_io
+    import llm
+    card = "draft: I added a check so the sender skips forgotten nodes\nfile: node.go\n"
+    monkeypatch.setattr(checks, "require_inside_work_tree", lambda: None)
+    monkeypatch.setattr(git_io, "anything_to_commit", lambda *, include_tracked: True)
+    monkeypatch.setattr(git_io, "commit_preview_diff", lambda *, include_tracked: card)
+    monkeypatch.setattr(llm, "generate_subject", lambda *a, **k: "Done.")
+
+    assert git_shim.main(["commit", "-s"]) == 0
+    assert calls == [[
+        "commit", "-m", "I added a check so the sender skips forgotten nodes", "-s",
+    ]]
 
 
 def test_hijack_noop_when_nothing_to_commit(monkeypatch):

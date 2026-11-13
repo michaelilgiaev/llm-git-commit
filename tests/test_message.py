@@ -110,3 +110,30 @@ def test_short_this_line_is_a_subject():
     # "This adds ..." is a subject. Rejecting it used to throw the line away
     # and drop the user into the editor.
     assert message.extract_subject("This adds a compile script") == "This adds a compile script"
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Ignore FORGOTTEN_NODE for the active sender",
+        "Insert a leading semicolon when semicolons are off",
+        "Increase the read buffer when the window grows",
+        "Initialize the cache before the first request",
+        "Surely the parser waits for the lock",
+        "Greatly reduce lock contention in the pool",
+        "Perfectly ordinary subjects stay intact here",
+    ],
+)
+def test_imperative_and_adverb_subjects_are_kept(reply):
+    assert message.extract_subject(reply) == reply
+
+
+def test_keep_line_saves_a_first_person_draft():
+    line = "I added a check so the sender skips forgotten nodes."
+    assert message.extract_subject(line) == ""
+    assert message.keep_line(line) == "I added a check so the sender skips forgotten nodes"
+
+
+def test_keep_line_drops_a_bare_acknowledgement():
+    assert message.keep_line("Done.") == ""
+    assert message.keep_line("Sure!") == ""
